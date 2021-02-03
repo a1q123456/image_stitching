@@ -63,7 +63,7 @@ int expos_comp_type = ExposureCompensator::GAIN_BLOCKS;
 int expos_comp_nr_feeds = 1;
 int expos_comp_nr_filtering = 2;
 int expos_comp_block_size = 64;
-string seam_find_type = "dp_color";
+string seam_find_type = "no";
 int blend_type = Blender::MULTI_BAND;
 int timelapse_type = Timelapser::AS_IS;
 float blend_strength = 5;
@@ -72,6 +72,28 @@ bool timelapse = false;
 int range_width = -1;
 
 Vec3f rotationMatrixToEulerAngles(Mat &R)
+{
+    float sy = sqrt(R.at<float>(0, 0) * R.at<float>(0, 0) + R.at<float>(1, 0) * R.at<float>(1, 0));
+
+    bool singular = sy < 1e-6; // If
+
+    float x, y, z;
+    if (!singular)
+    {
+        x = atan2(R.at<float>(2, 1), R.at<float>(2, 2));
+        y = atan2(-R.at<float>(2, 0), sy);
+        z = atan2(R.at<float>(1, 0), R.at<float>(0, 0));
+    }
+    else
+    {
+        x = atan2(-R.at<float>(1, 2), R.at<float>(1, 1));
+        y = atan2(-R.at<float>(2, 0), sy);
+        z = 0;
+    }
+    return Vec3f(x, y, z);
+}
+
+Vec3f rotationMatrixToEulerAnglesYXZ(Mat& R)
 {
     float sy = sqrt(R.at<float>(0, 0) * R.at<float>(0, 0) + R.at<float>(1, 0) * R.at<float>(1, 0));
 
@@ -175,6 +197,13 @@ cv::Mat eulerAnglesToRotationMatrix(cv::Vec3f &theta)
 
     return R;
 }
+
+struct CameraMergeState
+{
+    cv::detail::CameraParams sensor;
+    cv::detail::CameraParams cv;
+
+};
 
 int main(int argc, char *argv[])
 {
@@ -426,13 +455,29 @@ int main(int argc, char *argv[])
         return -1;
     }
 
-    Ptr<Estimator> estimator;
-    if (estimator_type == "affine")
-        estimator = makePtr<AffineBasedEstimator>();
-    else
-        estimator = makePtr<HomographyBasedEstimator>();
+    Ptr<HomographyBasedEstimator> estimator;
+    estimator = makePtr<HomographyBasedEstimator>(false);
 
     vector<CameraParams> camParamsFromCV;
+    {
+
+        std::vector<double> focals;
+        estimateFocal(features, pairwise_matches, focals);
+        camParamsFromCV.assign(num_images, CameraParams());
+        for (int i = 0; i < num_images; ++i)
+        {
+            camParamsFromCV[i].focal = focals[i];
+            camParamsFromCV[i].ppx = 0.5 * features[i].img_size.width;
+            camParamsFromCV[i].ppy = 0.5 * features[i].img_size.height;
+        }
+
+    }
+    for (auto i = 0; i < indices.size(); i++)
+    {
+        auto&& c = camParamsFromSensor[indices[i]];
+        camParamsFromCV[i].R = eulerAnglesToRotationMatrixYXZ(cv::Vec3f(c.R.at<float>(0), c.R.at<float>(1), c.R.at<float>(2)));
+    }
+
     if (!(*estimator)(features, pairwise_matches, camParamsFromCV))
     {
         cout << "Homography estimation failed.\n";
@@ -448,7 +493,7 @@ int main(int argc, char *argv[])
                                             << camParamsFromCV[i].K() << "\nR:\n"
                                             << camParamsFromCV[i].R);
     }
-
+    ba_cost_func = "ray";
     Ptr<detail::BundleAdjusterBase> adjuster;
     if (ba_cost_func == "reproj")
         adjuster = makePtr<detail::BundleAdjusterReproj>();
@@ -482,94 +527,114 @@ int main(int argc, char *argv[])
         return -1;
     }
 
+    for (auto&& cam : camParamsFromCV)
+    {
+        cv::Mat tmp;
+        cam.R.convertTo(tmp, CV_32F);
+        cam.R = tmp;
+    }
+    for (auto&& cam : camParamsFromCV)
+    {
+        std::cout << "camera cv: " << cam.R << std::endl;
+    }
     auto minFocal = *std::min_element(std::begin(camParamsFromCV), std::end(camParamsFromCV), [](auto &&a, auto &&b) {
         return a.focal < b.focal;
     });
+    auto cameras = camParamsFromCV;
+    std::vector<CameraMergeState> cameraMergeStates;
+    std::transform(std::begin(camParamsFromSensor), std::end(camParamsFromSensor), std::back_inserter(cameraMergeStates), [&](auto&& c)
+        {
+            return CameraMergeState{ createCamera(
+                minFocal.focal,
+                1.0,
+                minFocal.ppx,
+                minFocal.ppy,
+                eulerAnglesToRotationMatrixYXZ(cv::Vec3f(c.R.at<float>(0), c.R.at<float>(1), c.R.at<float>(2))),
+                cv::Mat(cv::Vec3f{0, 0, 0})) };
+        });
+
+    {
+        int i = 0;
+        for (auto idx : indices)
+        {
+            cameraMergeStates[idx].cv = camParamsFromCV[i];
+            i++;
+        }
+    }
+
+    auto firstCvIter = std::find_if(std::begin(cameraMergeStates), std::end(cameraMergeStates), [](auto&& c)
+        {
+            return c.cv.focal != 1;
+        });
+
+
+    if (firstCvIter != std::begin(cameraMergeStates))
+    {
+        for (auto i = std::make_reverse_iterator(firstCvIter - 1); i != std::rend(cameraMergeStates); i++)
+        {
+            auto d = (i - 1).base() == firstCvIter;
+            auto&& cur = *i;
+            auto next = *((i - 1).base());
+
+            auto curMat = cur.sensor.R;
+            auto nextMat = next.sensor.R;
+
+            auto nextCVMat = next.cv.R;
+
+            auto SCt = next.sensor.R * next.cv.R.t();
+
+            auto BAt = curMat * nextMat.t();
+            auto calibrated = nextCVMat * BAt;
+
+            cur.cv = cur.sensor;
+            cur.cv.R = calibrated;
+            cur.cv.focal = minFocal.focal;
+            cur.cv.ppx = minFocal.ppx;
+            cur.cv.ppy = minFocal.ppy;
+        }
+    }
+
+
+
+    for (auto i = std::begin(cameraMergeStates) + 1; i != std::end(cameraMergeStates); i++)
+    {
+        auto&& cur = *i;
+
+        if (cur.cv.focal != 1)
+        {
+            continue;
+        }
+        auto prev = *(i - 1);
+
+        auto curMat = cur.sensor.R;
+        auto prevMat = prev.sensor.R;
+
+        auto prevCVMat = prev.cv.R;
+
+        auto BAt = curMat * prevMat.t();
+        std::cout << "BAt: " << BAt << ", prevCVMat: " << prevCVMat << std::endl;
+        auto calibrated = prevCVMat * BAt;
+
+        cur.cv = cur.sensor;
+        cur.cv.R = calibrated;
+        cur.cv.focal = minFocal.focal;
+        cur.cv.ppx = minFocal.ppx;
+        cur.cv.ppy = minFocal.ppy;
+    }
 
     std::vector<cv::detail::CameraParams> cameras;
 
-    auto cvStartIdx = indices.front();
-
-    for (auto i = cvStartIdx - 1; i >= 0; i--)
-    {
-        img_names.insert(img_names.begin(), orig_img_names[i]);
-        auto nextCam = camParamsFromSensor[i + 1];
-        nextCam = createCamera(
-            minFocal.focal,
-            1.0,
-            minFocal.ppx,
-            minFocal.ppy,
-            eulerAnglesToRotationMatrixYXZ(cv::Vec3f(nextCam.R.at<float>(0), nextCam.R.at<float>(1), nextCam.R.at<float>(2))),
-            cv::Mat(cv::Vec3f{0, 0, 0}));
-
-        auto curCam = camParamsFromSensor[i];
-        curCam = createCamera(
-            minFocal.focal,
-            1.0,
-            minFocal.ppx,
-            minFocal.ppy,
-            eulerAnglesToRotationMatrixYXZ(cv::Vec3f(curCam.R.at<float>(0), curCam.R.at<float>(1), curCam.R.at<float>(2))),
-            cv::Mat(cv::Vec3f{0, 0, 0}));
-        
-        auto nextRMatrix = nextCam.R;
-        auto curRMatrix = curCam.R;
-        auto BAt = curRMatrix * nextRMatrix.t();
-
-        auto nextCamCV = camParamsFromCV[i + 1];
-        auto nextRMatrixCV = nextCamCV.R;
-
-        auto callibratedRMatrix = nextRMatrix * BAt;
-
-        curCam.R = callibratedRMatrix;
-        
-        camParamsFromCV.insert(std::begin(camParamsFromCV), curCam);
-        
-    }
-
-    for (auto i = cvStartIdx; i < camParamsFromSensor.size(); i++)
-    {
-        if (i >= img_names.size() || orig_img_names[i] != img_names[i])
+    std::transform(std::begin(cameraMergeStates), std::end(cameraMergeStates), std::back_inserter(cameras), [](auto&& s)
         {
-            img_names.insert(img_names.begin() + i, orig_img_names[i]);
+            return s.cv;
+        });
 
-            auto cam = camParamsFromSensor[i];
-            cam = createCamera(
-                minFocal.focal,
-                1.0,
-                minFocal.ppx,
-                minFocal.ppy,
-                eulerAnglesToRotationMatrixYXZ(cv::Vec3f(cam.R.at<float>(0), cam.R.at<float>(1), cam.R.at<float>(2))),
-                cv::Mat(cv::Vec3f{0, 0, 0}));
-
-            auto prevCam = camParamsFromSensor[i - 1];
-            prevCam = createCamera(
-                minFocal.focal,
-                1.0,
-                minFocal.ppx,
-                minFocal.ppy,
-                eulerAnglesToRotationMatrixYXZ(cv::Vec3f(prevCam.R.at<float>(0), prevCam.R.at<float>(1), prevCam.R.at<float>(2))),
-                cv::Mat(cv::Vec3f{0, 0, 0}));
-            auto curRMatrix = cam.R;
-            auto prevRMatrix = prevCam.R;
-            LOGLN("fixing: m1: " << curRMatrix << ", m0: " << prevRMatrix);
-            cv::Mat prevCVRMatrix;
-            camParamsFromCV[i - 1].R.convertTo(prevCVRMatrix, CV_32F);
-            auto BAt = curRMatrix * prevRMatrix.t();
-            auto callibratedMatrix = prevCVRMatrix * BAt;
-
-            cam.R = callibratedMatrix;
-
-            cameras.push_back(cam);
-        }
-        else
-        {
-            cv::Mat tmp;
-            camParamsFromCV[i].R.convertTo(tmp, CV_32F);
-            camParamsFromCV[i].R = tmp;
-            cameras.push_back(camParamsFromCV[i]);
-        }
+    for (auto&& cam : cameras)
+    {
+        cv::Mat tmp;
+        cam.R.convertTo(tmp, CV_32F);
+        cam.R = tmp;
     }
-
     for (auto &cam : cameras)
     {
         auto xyz = rotationMatrixToEulerAngles(cam.R);
