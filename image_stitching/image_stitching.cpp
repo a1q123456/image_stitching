@@ -19,10 +19,8 @@
 #define _USE_MATH_DEFINES
 #include <math.h>
 #include <filesystem>
-#include <array>
 #include <libexif/exif-data.h>
 #include <libexif/exif-loader.h>
-#include <string>
 
 #ifdef HAVE_OPENCV_XFEATURES2D
 #include "opencv2/xfeatures2d.hpp"
@@ -73,7 +71,7 @@ string result_name = "result.jpg";
 bool timelapse = false;
 int range_width = -1;
 
-Vec3f rotationMatrixToEulerAngles(Mat& R)
+Vec3f rotationMatrixToEulerAngles(Mat &R)
 {
     float sy = sqrt(R.at<float>(0, 0) * R.at<float>(0, 0) + R.at<float>(1, 0) * R.at<float>(1, 0));
 
@@ -93,36 +91,31 @@ Vec3f rotationMatrixToEulerAngles(Mat& R)
         z = 0;
     }
     return Vec3f(x, y, z);
-
-
-
 }
 
-template<typename TFloat>
+template <typename TFloat>
 TFloat radToDeg(TFloat rad)
 {
     return rad / M_PI * 180;
 }
 
-template<typename TFloat>
+template <typename TFloat>
 TFloat degToRad(TFloat deg)
 {
     return deg / 180 * M_PI;
 }
 
-
 namespace LibExif
 {
     struct ExifLoaderDeleter
     {
-        void operator()(ExifLoader* ld)
+        void operator()(ExifLoader *ld)
         {
             exif_loader_unref(ld);
         }
     };
     using ExifLoaderPtr = std::unique_ptr<ExifLoader, ExifLoaderDeleter>;
-}
-
+} // namespace LibExif
 
 cv::detail::CameraParams createCamera(double focal, double aspect, double ppx, double ppy, cv::Mat R, cv::Mat t)
 {
@@ -137,67 +130,53 @@ cv::detail::CameraParams createCamera(double focal, double aspect, double ppx, d
     return ret;
 }
 
-cv::Mat eulerAnglesToRotationMatrixYXZ(cv::Vec3f& theta)
+cv::Mat eulerAnglesToRotationMatrixYXZ(cv::Vec3f &theta)
 {
     // Calculate rotation about x axis
-    cv::Mat R_x = (cv::Mat_<double>(3, 3) <<
-        1, 0, 0,
-        0, std::cos(theta[0]), -std::sin(theta[0]),
-        0, std::sin(theta[0]), std::cos(theta[0])
-        );
+    cv::Mat R_x = (cv::Mat_<double>(3, 3) << 1, 0, 0,
+                   0, std::cos(theta[0]), -std::sin(theta[0]),
+                   0, std::sin(theta[0]), std::cos(theta[0]));
 
     // Calculate rotation about y axis
-    cv::Mat R_y = (cv::Mat_<double>(3, 3) <<
-        std::cos(theta[1]), 0, std::sin(theta[1]),
-        0, 1, 0,
-        -std::sin(theta[1]), 0, std::cos(theta[1])
-        );
+    cv::Mat R_y = (cv::Mat_<double>(3, 3) << std::cos(theta[1]), 0, std::sin(theta[1]),
+                   0, 1, 0,
+                   -std::sin(theta[1]), 0, std::cos(theta[1]));
 
     // Calculate rotation about z axis
-    cv::Mat R_z = (cv::Mat_<double>(3, 3) <<
-        std::cos(theta[2]), -std::sin(theta[2]), 0,
-        std::sin(theta[2]), std::cos(theta[2]), 0,
-        0, 0, 1);
-
+    cv::Mat R_z = (cv::Mat_<double>(3, 3) << std::cos(theta[2]), -std::sin(theta[2]), 0,
+                   std::sin(theta[2]), std::cos(theta[2]), 0,
+                   0, 0, 1);
 
     // Combined rotation matrix
     cv::Mat R = R_y * R_x * R_z;
 
     return R;
-
 }
 
-cv::Mat eulerAnglesToRotationMatrix(cv::Vec3f& theta)
+cv::Mat eulerAnglesToRotationMatrix(cv::Vec3f &theta)
 {
     // Calculate rotation about x axis
-    cv::Mat R_x = (cv::Mat_<double>(3, 3) <<
-        1, 0, 0,
-        0, std::cos(theta[0]), -std::sin(theta[0]),
-        0, std::sin(theta[0]), std::cos(theta[0])
-        );
+    cv::Mat R_x = (cv::Mat_<double>(3, 3) << 1, 0, 0,
+                   0, std::cos(theta[0]), -std::sin(theta[0]),
+                   0, std::sin(theta[0]), std::cos(theta[0]));
 
     // Calculate rotation about y axis
-    cv::Mat R_y = (cv::Mat_<double>(3, 3) <<
-        std::cos(theta[1]), 0, std::sin(theta[1]),
-        0, 1, 0,
-        -std::sin(theta[1]), 0, std::cos(theta[1])
-        );
+    cv::Mat R_y = (cv::Mat_<double>(3, 3) << std::cos(theta[1]), 0, std::sin(theta[1]),
+                   0, 1, 0,
+                   -std::sin(theta[1]), 0, std::cos(theta[1]));
 
     // Calculate rotation about z axis
-    cv::Mat R_z = (cv::Mat_<double>(3, 3) <<
-        std::cos(theta[2]), -std::sin(theta[2]), 0,
-        std::sin(theta[2]), std::cos(theta[2]), 0,
-        0, 0, 1);
-
+    cv::Mat R_z = (cv::Mat_<double>(3, 3) << std::cos(theta[2]), -std::sin(theta[2]), 0,
+                   std::sin(theta[2]), std::cos(theta[2]), 0,
+                   0, 0, 1);
 
     // Combined rotation matrix
     cv::Mat R = R_z * R_y * R_x;
 
     return R;
-
 }
 
-int main(int argc, char* argv[])
+int main(int argc, char *argv[])
 {
     if (argc < 2)
     {
@@ -207,12 +186,11 @@ int main(int argc, char* argv[])
     std::transform(
         std::filesystem::directory_iterator(std::filesystem::path(argv[1])),
         std::filesystem::directory_iterator{}, std::back_inserter(img_names),
-        [](const std::filesystem::directory_entry& de)
-        {
+        [](const std::filesystem::directory_entry &de) {
             return de.path().string();
         });
 
-    std::sort(std::begin(img_names), std::end(img_names), [](const std::string& a, const std::string& b) {
+    std::sort(std::begin(img_names), std::end(img_names), [](const std::string &a, const std::string &b) {
         auto pa = std::filesystem::path(a);
         auto pb = std::filesystem::path(b);
 
@@ -227,27 +205,24 @@ int main(int argc, char* argv[])
     std::transform(
         std::begin(img_names),
         std::end(img_names), std::back_inserter(camParamsFromSensor),
-        [](const std::string& path)
-        {
+        [](const std::string &path) {
             LibExif::ExifLoaderPtr loader;
             loader.reset(exif_loader_new());
             exif_loader_write_file(loader.get(), path.c_str());
             auto data = exif_loader_get_data(loader.get());
             LOGLN("image: " << path);
             cv::detail::CameraParams ret{};
-            auto getFocalLength = [](ExifEntry* ee, void* user_data)
-            {
+            auto getFocalLength = [](ExifEntry *ee, void *user_data) {
                 char buf[256];
                 if (ee->tag == EXIF_TAG_FOCAL_LENGTH)
                 {
                     exif_entry_get_value(ee, buf, std::end(buf) - std::begin(buf) - 1);
 
-                    auto focalLenVal = reinterpret_cast<double*>(user_data);
+                    auto focalLenVal = reinterpret_cast<double *>(user_data);
                     *focalLenVal = std::strtod(buf, nullptr);
                 }
             };
-            auto getRotation = [](ExifEntry* ee, void* user_data)
-            {
+            auto getRotation = [](ExifEntry *ee, void *user_data) {
                 char buf[256];
                 if (ee->tag == EXIF_TAG_IMAGE_DESCRIPTION)
                 {
@@ -263,24 +238,24 @@ int main(int argc, char* argv[])
                     pos = sv.find("value2:");
                     sv = sv.substr(pos + 7);
                     z = std::strtod(sv.data(), nullptr);
-                    
-                    auto r = reinterpret_cast<cv::Mat*>(user_data);
+
+                    auto r = reinterpret_cast<cv::Mat *>(user_data);
                     x -= degToRad(90.0);
                     // x *= -1.0;
                     //y *= -1.0;
                     //z *= -1.0;
                     *r = cv::Mat(cv::Vec3f(x, y, z));
 
-                    LOGLN("image rotation " << ": x: " << radToDeg(x) << ", " << ", y: " << radToDeg(y) << ", z: " << radToDeg(z));
+                    LOGLN("image rotation "
+                          << ": x: " << radToDeg(x) << ", "
+                          << ", y: " << radToDeg(y) << ", z: " << radToDeg(z));
                 }
             };
             exif_content_foreach_entry(data->ifd[EXIF_IFD_0], getRotation, &ret.R);
             exif_content_foreach_entry(data->ifd[EXIF_IFD_EXIF], getFocalLength, &ret.focal);
 
-
             return ret;
         });
-
 
     // Check if have enough images
     int num_images = static_cast<int>(img_names.size());
@@ -391,9 +366,8 @@ int main(int argc, char* argv[])
     else
         matcher = makePtr<BestOf2NearestRangeMatcher>(range_width, try_cuda, match_conf);
 
-
     std::vector<std::string> removedNames;
-    for (auto iter = std::begin(features); iter != std::end(features); )
+    for (auto iter = std::begin(features); iter != std::end(features);)
     {
         if (iter->keypoints.size() != 500)
         {
@@ -408,10 +382,10 @@ int main(int argc, char* argv[])
     }
 
     auto orig_img_names = img_names;
-    img_names.erase(std::remove_if(std::begin(img_names), std::end(img_names), [&](const std::string& s)
-        {
-            return std::find(std::begin(removedNames), std::end(removedNames), s) != std::end(removedNames);
-        }), img_names.end());
+    img_names.erase(std::remove_if(std::begin(img_names), std::end(img_names), [&](const std::string &s) {
+                        return std::find(std::begin(removedNames), std::end(removedNames), s) != std::end(removedNames);
+                    }),
+                    img_names.end());
 
     (*matcher)(features, pairwise_matches);
     matcher->collectGarbage();
@@ -470,14 +444,20 @@ int main(int argc, char* argv[])
         Mat R;
         camParamsFromCV[i].R.convertTo(R, CV_32F);
         camParamsFromCV[i].R = R;
-        LOGLN("Initial camera intrinsics #" << indices[i] + 1 << ":\nK:\n" << camParamsFromCV[i].K() << "\nR:\n" << camParamsFromCV[i].R);
+        LOGLN("Initial camera intrinsics #" << indices[i] + 1 << ":\nK:\n"
+                                            << camParamsFromCV[i].K() << "\nR:\n"
+                                            << camParamsFromCV[i].R);
     }
 
     Ptr<detail::BundleAdjusterBase> adjuster;
-    if (ba_cost_func == "reproj") adjuster = makePtr<detail::BundleAdjusterReproj>();
-    else if (ba_cost_func == "ray") adjuster = makePtr<detail::BundleAdjusterRay>();
-    else if (ba_cost_func == "affine") adjuster = makePtr<detail::BundleAdjusterAffinePartial>();
-    else if (ba_cost_func == "no") adjuster = makePtr<NoBundleAdjuster>();
+    if (ba_cost_func == "reproj")
+        adjuster = makePtr<detail::BundleAdjusterReproj>();
+    else if (ba_cost_func == "ray")
+        adjuster = makePtr<detail::BundleAdjusterRay>();
+    else if (ba_cost_func == "affine")
+        adjuster = makePtr<detail::BundleAdjusterAffinePartial>();
+    else if (ba_cost_func == "no")
+        adjuster = makePtr<NoBundleAdjuster>();
     else
     {
         cout << "Unknown bundle adjustment cost function: '" << ba_cost_func << "'.\n";
@@ -485,11 +465,16 @@ int main(int argc, char* argv[])
     }
     adjuster->setConfThresh(conf_thresh);
     Mat_<uchar> refine_mask = Mat::zeros(3, 3, CV_8U);
-    if (ba_refine_mask[0] == 'x') refine_mask(0, 0) = 1;
-    if (ba_refine_mask[1] == 'x') refine_mask(0, 1) = 1;
-    if (ba_refine_mask[2] == 'x') refine_mask(0, 2) = 1;
-    if (ba_refine_mask[3] == 'x') refine_mask(1, 1) = 1;
-    if (ba_refine_mask[4] == 'x') refine_mask(1, 2) = 1;
+    if (ba_refine_mask[0] == 'x')
+        refine_mask(0, 0) = 1;
+    if (ba_refine_mask[1] == 'x')
+        refine_mask(0, 1) = 1;
+    if (ba_refine_mask[2] == 'x')
+        refine_mask(0, 2) = 1;
+    if (ba_refine_mask[3] == 'x')
+        refine_mask(1, 1) = 1;
+    if (ba_refine_mask[4] == 'x')
+        refine_mask(1, 2) = 1;
     adjuster->setRefinementMask(refine_mask);
     if (!(*adjuster)(features, pairwise_matches, camParamsFromCV))
     {
@@ -497,15 +482,51 @@ int main(int argc, char* argv[])
         return -1;
     }
 
-
-    auto minFocal = *std::min_element(std::begin(camParamsFromCV), std::end(camParamsFromCV), [](auto&& a, auto&& b)
-        {
-            return a.focal < b.focal;
-        });
+    auto minFocal = *std::min_element(std::begin(camParamsFromCV), std::end(camParamsFromCV), [](auto &&a, auto &&b) {
+        return a.focal < b.focal;
+    });
 
     std::vector<cv::detail::CameraParams> cameras;
 
-    for (auto i = 0; i < camParamsFromSensor.size(); i++)
+    auto cvStartIdx = indices.front();
+
+    for (auto i = cvStartIdx - 1; i >= 0; i--)
+    {
+        img_names.insert(img_names.begin(), orig_img_names[i]);
+        auto nextCam = camParamsFromSensor[i + 1];
+        nextCam = createCamera(
+            minFocal.focal,
+            1.0,
+            minFocal.ppx,
+            minFocal.ppy,
+            eulerAnglesToRotationMatrixYXZ(cv::Vec3f(nextCam.R.at<float>(0), nextCam.R.at<float>(1), nextCam.R.at<float>(2))),
+            cv::Mat(cv::Vec3f{0, 0, 0}));
+
+        auto curCam = camParamsFromSensor[i];
+        curCam = createCamera(
+            minFocal.focal,
+            1.0,
+            minFocal.ppx,
+            minFocal.ppy,
+            eulerAnglesToRotationMatrixYXZ(cv::Vec3f(curCam.R.at<float>(0), curCam.R.at<float>(1), curCam.R.at<float>(2))),
+            cv::Mat(cv::Vec3f{0, 0, 0}));
+        
+        auto nextRMatrix = nextCam.R;
+        auto curRMatrix = curCam.R;
+        auto BAt = curRMatrix * nextRMatrix.t();
+
+        auto nextCamCV = camParamsFromCV[i + 1];
+        auto nextRMatrixCV = nextCamCV.R;
+
+        auto callibratedRMatrix = nextRMatrix * BAt;
+
+        curCam.R = callibratedRMatrix;
+        
+        camParamsFromCV.insert(std::begin(camParamsFromCV), curCam);
+        
+    }
+
+    for (auto i = cvStartIdx; i < camParamsFromSensor.size(); i++)
     {
         if (i >= img_names.size() || orig_img_names[i] != img_names[i])
         {
@@ -517,41 +538,27 @@ int main(int argc, char* argv[])
                 1.0,
                 minFocal.ppx,
                 minFocal.ppy,
-                eulerAnglesToRotationMatrix(cv::Vec3f(cam.R.at<float>(0), cam.R.at<float>(1), cam.R.at<float>(2))),
-                cv::Mat(cv::Vec3f{ 0, 0, 0 })
-            );
-            if (i == 0)
-            {
-                cameras.push_back(cam);
-                camParamsFromCV.insert(camParamsFromCV.begin() + i, cam);
-                continue;
-            }
+                eulerAnglesToRotationMatrixYXZ(cv::Vec3f(cam.R.at<float>(0), cam.R.at<float>(1), cam.R.at<float>(2))),
+                cv::Mat(cv::Vec3f{0, 0, 0}));
+
             auto prevCam = camParamsFromSensor[i - 1];
             prevCam = createCamera(
                 minFocal.focal,
                 1.0,
                 minFocal.ppx,
                 minFocal.ppy,
-                eulerAnglesToRotationMatrix(cv::Vec3f(prevCam.R.at<float>(0), prevCam.R.at<float>(1), prevCam.R.at<float>(2))),
-                cv::Mat(cv::Vec3f{ 0, 0, 0 })
-            );
+                eulerAnglesToRotationMatrixYXZ(cv::Vec3f(prevCam.R.at<float>(0), prevCam.R.at<float>(1), prevCam.R.at<float>(2))),
+                cv::Mat(cv::Vec3f{0, 0, 0}));
             auto curRMatrix = cam.R;
             auto prevRMatrix = prevCam.R;
-
-            auto curEuler = rotationMatrixToEulerAngles(curRMatrix);
-            auto prevEuler = rotationMatrixToEulerAngles(prevRMatrix);
-
-            auto rDelta = curEuler - prevEuler;
+            LOGLN("fixing: m1: " << curRMatrix << ", m0: " << prevRMatrix);
             cv::Mat prevCVRMatrix;
             camParamsFromCV[i - 1].R.convertTo(prevCVRMatrix, CV_32F);
-            auto prevCVEuler = rotationMatrixToEulerAngles(prevCVRMatrix);
-            auto callibratedEuler = rDelta + prevCVEuler;
-            cam.R = eulerAnglesToRotationMatrix(callibratedEuler);
+            auto BAt = curRMatrix * prevRMatrix.t();
+            auto callibratedMatrix = prevCVRMatrix * BAt;
 
-            cv::Mat tmp;
-            cam.R.convertTo(tmp, CV_32F);
-            cam.R = tmp;
-            camParamsFromCV.insert(camParamsFromCV.begin() + i, cam);
+            cam.R = callibratedMatrix;
+
             cameras.push_back(cam);
         }
         else
@@ -563,7 +570,7 @@ int main(int argc, char* argv[])
         }
     }
 
-    for (auto& cam : cameras)
+    for (auto &cam : cameras)
     {
         auto xyz = rotationMatrixToEulerAngles(cam.R);
         auto xyzDeg = cv::Vec3f(radToDeg(xyz[0]), radToDeg(xyz[1]), radToDeg(xyz[2]));
@@ -574,8 +581,6 @@ int main(int argc, char* argv[])
     }
     camParamsFromCV.clear();
     camParamsFromSensor.clear();
-
-
 
     num_images = cameras.size();
     full_img_sizes = orig_full_img_sizes;
@@ -689,8 +694,10 @@ int main(int argc, char* argv[])
         Mat_<float> K;
         cameras[i].K().convertTo(K, CV_32F);
         float swa = (float)seam_work_aspect;
-        K(0, 0) *= swa; K(0, 2) *= swa;
-        K(1, 1) *= swa; K(1, 2) *= swa;
+        K(0, 0) *= swa;
+        K(0, 2) *= swa;
+        K(1, 1) *= swa;
+        K(1, 2) *= swa;
 
         corners[i] = warper->warp(images[i], K, cameras[i].R, INTER_LINEAR, BORDER_REFLECT, images_warped[i]);
         sizes[i] = images_warped[i].size();
@@ -710,21 +717,21 @@ int main(int argc, char* argv[])
 #endif
 
     Ptr<ExposureCompensator> compensator = ExposureCompensator::createDefault(expos_comp_type);
-    if (dynamic_cast<GainCompensator*>(compensator.get()))
+    if (dynamic_cast<GainCompensator *>(compensator.get()))
     {
-        GainCompensator* gcompensator = dynamic_cast<GainCompensator*>(compensator.get());
+        GainCompensator *gcompensator = dynamic_cast<GainCompensator *>(compensator.get());
         gcompensator->setNrFeeds(expos_comp_nr_feeds);
     }
 
-    if (dynamic_cast<ChannelsCompensator*>(compensator.get()))
+    if (dynamic_cast<ChannelsCompensator *>(compensator.get()))
     {
-        ChannelsCompensator* ccompensator = dynamic_cast<ChannelsCompensator*>(compensator.get());
+        ChannelsCompensator *ccompensator = dynamic_cast<ChannelsCompensator *>(compensator.get());
         ccompensator->setNrFeeds(expos_comp_nr_feeds);
     }
 
-    if (dynamic_cast<BlocksCompensator*>(compensator.get()))
+    if (dynamic_cast<BlocksCompensator *>(compensator.get()))
     {
-        BlocksCompensator* bcompensator = dynamic_cast<BlocksCompensator*>(compensator.get());
+        BlocksCompensator *bcompensator = dynamic_cast<BlocksCompensator *>(compensator.get());
         bcompensator->setNrFeeds(expos_comp_nr_feeds);
         bcompensator->setNrGainsFilteringIterations(expos_comp_nr_filtering);
         bcompensator->setBlockSize(expos_comp_block_size, expos_comp_block_size);
@@ -881,13 +888,13 @@ int main(int argc, char* argv[])
                 blender = Blender::createDefault(Blender::NO, try_cuda);
             else if (blend_type == Blender::MULTI_BAND)
             {
-                MultiBandBlender* mb = dynamic_cast<MultiBandBlender*>(blender.get());
+                MultiBandBlender *mb = dynamic_cast<MultiBandBlender *>(blender.get());
                 mb->setNumBands(static_cast<int>(ceil(log(blend_width) / log(2.)) - 1.));
                 LOGLN("Multi-band blender, number of bands: " << mb->numBands());
             }
             else if (blend_type == Blender::FEATHER)
             {
-                FeatherBlender* fb = dynamic_cast<FeatherBlender*>(blender.get());
+                FeatherBlender *fb = dynamic_cast<FeatherBlender *>(blender.get());
                 fb->setSharpness(1.f / blend_width);
                 LOGLN("Feather blender, sharpness: " << fb->sharpness());
             }
