@@ -556,16 +556,14 @@ int main(int argc, char *argv[])
     std::vector<CameraMergeState> cameraMergeStates;
     std::transform(std::begin(camParamsFromSensor), std::end(camParamsFromSensor), std::back_inserter(cameraMergeStates), [&](auto&& c)
         {
-            auto R = eulerAnglesToRotationMatrixYXZ(cv::Vec3d(-c.R.at<double>(0), c.R.at<double>(1), c.R.at<double>(2)));
-            auto rot = eulerAnglesToRotationMatrixYXZ(cv::Vec3d(-degToRad(90), 0, 0));
-            cv::Mat tmpR = rot * R;
+            auto R = eulerAnglesToRotationMatrixYXZ(cv::Vec3d(c.R.at<double>(0) - degToRad(90.0), c.R.at<double>(1), c.R.at<double>(2)));
 
             return CameraMergeState{ createCamera(
                 minFocal.focal,
                 1.0,
                 minFocal.ppx,
                 minFocal.ppy,
-                tmpR,
+                R,
                 cv::Mat(cv::Vec3f{0, 0, 0}), true) };
         });
 
@@ -586,11 +584,11 @@ int main(int argc, char *argv[])
 
     auto pivot = cameraMergeStates[indices[1]].sensor.R;
 
-    for (auto&& c : cameraMergeStates)
-    {
-        cv::Mat BAt = c.sensor.R * pivot.t();
-        c.sensor.R = BAt;
-    }
+    //for (auto&& c : cameraMergeStates)
+    //{
+    //    cv::Mat BAt = c.sensor.R * pivot.t();
+    //    c.sensor.R = BAt;
+    //}
 
     for (auto&& c : cameraMergeStates)
     {
