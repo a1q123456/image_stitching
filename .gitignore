@@ -4,3 +4,4 @@ out/**/*
 build/**/*
 CMakeSettings.json
 result.jpg
+*.JPG
