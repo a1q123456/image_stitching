@@ -95,6 +95,38 @@ Vec3f rotationMatrixToEulerAngles(Mat& R)
     return Vec3f(x, y, z);
 }
 
+template<typename TFloat>
+cv::Vec<TFloat, 3> rotationMatrixToEulerAnglesZYX(Mat& R)
+{
+    TFloat x, y, z;
+
+    auto m11 = R.at<TFloat>(0, 0);
+    auto m12 = R.at<TFloat>(1, 0);
+    auto m13 = R.at<TFloat>(2, 0);
+    auto m21 = R.at<TFloat>(0, 1);
+    auto m22 = R.at<TFloat>(1, 1);
+    auto m23 = R.at<TFloat>(2, 1);
+    auto m31 = R.at<TFloat>(0, 2);
+    auto m32 = R.at<TFloat>(1, 2);
+    auto m33 = R.at<TFloat>(2, 2);
+
+    x = std::asin(clamp(m32, TFloat(-1), TFloat(1)));
+
+    if (std::abs(m32) < 0.9999999) {
+
+        y = atan2(-m31, m33);
+        z = atan2(-m12, m22);
+
+    }
+    else {
+
+        y = 0;
+        z = atan2(m21, m11);
+    }
+
+    return cv::Vec<TFloat, 3>(x, y, z);
+}
+
 template <typename TFloat>
 TFloat radToDeg(TFloat rad)
 {
@@ -548,6 +580,10 @@ int main(int argc, char* argv[])
             lastBR = BR;
             cv::Mat R = BAt * baseR;
             baseR = R;
+
+            auto vec = rotationMatrixToEulerAnglesZYX<double>(R);
+            vec = cv::Vec3d(radToDeg(vec[0]), radToDeg(vec[1]), radToDeg(vec[2]));
+            std::cout << "vec starts 0: " << vec << std::endl;
             return CameraMergeState{ createCamera(
                 minFocal.focal,
                 1.0,
@@ -560,7 +596,7 @@ int main(int argc, char* argv[])
         auto lastBR = camParamsFromCV.front().R;
         auto cvFirstIdx = indices.front();
 
-        auto baseR = cameraMergeStates[cvFirstIdx].cv.R;
+        auto baseR = cameraMergeStates[cvFirstIdx].sensor.R;
         for (auto&& cvCam : camParamsFromCV)
         {
             auto BR = cvCam.R;
@@ -588,12 +624,19 @@ int main(int argc, char* argv[])
 
     for (auto&& c : cameraMergeStates)
     {
+        cv::Vec3d degVec;
         if (c.cv.focal == 1)
         {
+            degVec = cv::Vec3d{ 0 , 0, 0 };
             c.cv = c.sensor;
         }
-        cv::Mat val = c.sensor.R * c.cv.R.t();
-        std::cout << "error val: " << val << std::endl;
+        else
+        {
+            cv::Mat val = c.sensor.R * c.cv.R.t();
+            auto vec = rotationMatrixToEulerAnglesZYX<double>(val);
+            auto degVec = cv::Vec3d{ radToDeg(vec[0]), radToDeg(vec[1]), radToDeg(vec[2]) };
+        }
+        std::cout << "error val: " << degVec << std::endl;
     }
 
     //if (firstCvIter != std::begin(cameraMergeStates))
@@ -661,10 +704,10 @@ int main(int argc, char* argv[])
     }
     for (auto& cam : cameras)
     {
-        auto xyz = rotationMatrixToEulerAngles(cam.R);
-        auto xyzDeg = cv::Vec3d(radToDeg(xyz[0]), radToDeg(xyz[1]), radToDeg(xyz[2]));
+        auto zyx = rotationMatrixToEulerAnglesZYX<float>(cam.R);
+        auto zyxDeg = cv::Vec3d(radToDeg(zyx[0]), radToDeg(zyx[1]), radToDeg(zyx[2]));
         std::cout << "rotationMatrix: " << cam.R << std::endl;
-        std::cout << "rotation: " << xyzDeg << std::endl;
+        std::cout << "rotation: " << zyxDeg << std::endl;
 
         std::cout << "translation: " << cam.t << std::endl;
     }
