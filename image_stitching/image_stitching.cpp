@@ -73,33 +73,20 @@ string result_name = "result.jpg";
 bool timelapse = false;
 int range_width = -1;
 
-Vec3f rotationMatrixToEulerAngles(Mat& R)
+enum class EulerOrder
 {
-    float sy = sqrt(R.at<float>(0, 0) * R.at<float>(0, 0) + R.at<float>(1, 0) * R.at<float>(1, 0));
-
-    bool singular = sy < 1e-6; // If
-
-    float x, y, z;
-    if (!singular)
-    {
-        x = atan2(R.at<float>(2, 1), R.at<float>(2, 2));
-        y = atan2(-R.at<float>(2, 0), sy);
-        z = atan2(R.at<float>(1, 0), R.at<float>(0, 0));
-    }
-    else
-    {
-        x = atan2(-R.at<float>(1, 2), R.at<float>(1, 1));
-        y = atan2(-R.at<float>(2, 0), sy);
-        z = 0;
-    }
-    return Vec3f(x, y, z);
-}
+    XYZ,
+    YXZ,
+    ZXY,
+    ZYX,
+    YZX,
+    XZY
+};
 
 template<typename TFloat>
-cv::Vec<TFloat, 3> rotationMatrixToEulerAnglesZYX(Mat& R)
+cv::Vec<TFloat, 3> rotationMatrixToEulerAngles(Mat R, EulerOrder order)
 {
     TFloat x, y, z;
-
     auto m11 = R.at<TFloat>(0, 0);
     auto m12 = R.at<TFloat>(1, 0);
     auto m13 = R.at<TFloat>(2, 0);
@@ -110,21 +97,288 @@ cv::Vec<TFloat, 3> rotationMatrixToEulerAnglesZYX(Mat& R)
     auto m32 = R.at<TFloat>(1, 2);
     auto m33 = R.at<TFloat>(2, 2);
 
-    x = std::asin(clamp(m32, TFloat(-1), TFloat(1)));
+    switch (order) {
 
-    if (std::abs(m32) < 0.9999999) {
+    case EulerOrder::XYZ:
 
-        y = atan2(-m31, m33);
-        z = atan2(-m12, m22);
+        y = std::asin(std::clamp(m13, TFloat(-1), TFloat(1)));
 
+        if (std::abs(m13) < 0.9999999) {
+            x = std::atan2(-m23, m33);
+            z = std::atan2(-m12, m11);
+        }
+        else {
+            x = std::atan2(m32, m22);
+            z = 0;
+        }
+
+        break;
+
+    case EulerOrder::YXZ:
+
+        x = std::asin(-std::clamp(m23, TFloat(-1), TFloat(1)));
+
+        if (std::abs(m23) < 0.9999999) {
+
+            y = std::atan2(m13, m33);
+            z = std::atan2(m21, m22);
+
+        }
+        else {
+
+            y = std::atan2(-m31, m11);
+            z = 0;
+
+        }
+
+        break;
+
+    case EulerOrder::ZXY:
+
+        x = std::asin(std::clamp(m32, TFloat(-1), TFloat(1)));
+
+        if (std::abs(m32) < 0.9999999) {
+
+            y = std::atan2(-m31, m33);
+            z = std::atan2(-m12, m22);
+
+        }
+        else {
+
+            y = 0;
+            z = std::atan2(m21, m11);
+
+        }
+
+        break;
+
+    case EulerOrder::ZYX:
+
+        y = std::asin(-std::clamp(m31, TFloat(-1), TFloat(1)));
+
+        if (std::abs(m31) < 0.9999999) {
+
+            x = std::atan2(m32, m33);
+            z = std::atan2(m21, m11);
+
+        }
+        else {
+
+            x = 0;
+            z = std::atan2(-m12, m22);
+
+        }
+
+        break;
+
+    case EulerOrder::YZX:
+
+        z = std::asin(std::clamp(m21, TFloat(-1), TFloat(1)));
+
+        if (std::abs(m21) < 0.9999999) {
+
+            x = std::atan2(-m23, m22);
+            y = std::atan2(-m31, m11);
+
+        }
+        else {
+
+            x = 0;
+            y = std::atan2(m13, m33);
+
+        }
+
+        break;
+
+    case EulerOrder::XZY:
+
+        z = std::asin(-std::clamp(m12, TFloat(-1), TFloat(1)));
+
+        if (std::abs(m12) < 0.9999999) {
+
+            x = std::atan2(m32, m22);
+            y = std::atan2(m13, m11);
+
+        }
+        else {
+
+            x = std::atan2(-m23, m33);
+            y = 0;
+
+        }
+
+        break;
+    default:
+        assert(false);
     }
-    else {
-
-        y = 0;
-        z = atan2(m21, m11);
-    }
-
     return cv::Vec<TFloat, 3>(x, y, z);
+}
+
+template<typename TFloat>
+cv::Mat eulerAnglesToRotationMatrix(cv::Vec<TFloat, 3>& euler, EulerOrder order)
+{
+    cv::Mat_<TFloat> ret(3, 3);
+    TFloat te[16];
+
+    auto x = euler[0];
+    auto y = euler[1];
+    auto z = euler[2];
+
+    auto a = std::cos(x);
+    auto b = std::sin(x);
+    auto c = std::cos(y);
+    auto d = std::sin(y);
+    auto e = std::cos(z);
+    auto f = std::sin(z);
+
+    switch (order)
+    {
+    case EulerOrder::XYZ:
+    {
+        auto ae = a * e;
+        auto af = a * f;
+        auto be = b * e;
+        auto bf = b * f;
+
+        te[0] = c * e;
+        te[4] = -c * f;
+        te[8] = d;
+
+        te[1] = af + be * d;
+        te[5] = ae - bf * d;
+        te[9] = -b * c;
+
+        te[2] = bf - ae * d;
+        te[6] = be + af * d;
+        te[10] = a * c;
+        break;
+    }
+    case EulerOrder::YXZ:
+    {
+        auto ce = c * e;
+        auto cf = c * f;
+        auto de = d * e;
+        auto df = d * f;
+
+        te[0] = ce + df * b;
+        te[4] = de * b - cf;
+        te[8] = a * d;
+
+        te[1] = a * f;
+        te[5] = a * e;
+        te[9] = -b;
+
+        te[2] = cf * b - de;
+        te[6] = df + ce * b;
+        te[10] = a * c;
+        break;
+    }
+    case EulerOrder::ZXY:
+    {
+        auto ce = c * e;
+        auto cf = c * f;
+        auto de = d * e;
+        auto df = d * f;
+
+        te[0] = ce - df * b;
+        te[4] = -a * f;
+        te[8] = de + cf * b;
+
+        te[1] = cf + de * b;
+        te[5] = a * e;
+        te[9] = df - ce * b;
+
+        te[2] = -a * d;
+        te[6] = b;
+        te[10] = a * c;
+        break;
+    }
+    case EulerOrder::ZYX:
+    {
+        auto ae = a * e;
+        auto af = a * f;
+        auto be = b * e;
+        auto bf = b * f;
+
+        te[0] = c * e;
+        te[4] = be * d - af;
+        te[8] = ae * d + bf;
+
+        te[1] = c * f;
+        te[5] = bf * d + ae;
+        te[9] = af * d - be;
+
+        te[2] = -d;
+        te[6] = b * c;
+        te[10] = a * c;
+        break;
+    }
+    case EulerOrder::YZX:
+    {
+        auto ac = a * c;
+        auto ad = a * d;
+        auto bc = b * c;
+        auto bd = b * d;
+
+        te[0] = c * e;
+        te[4] = bd - ac * f;
+        te[8] = bc * f + ad;
+
+        te[1] = f;
+        te[5] = a * e;
+        te[9] = -b * e;
+
+        te[2] = -d * e;
+        te[6] = ad * f + bc;
+        te[10] = ac - bd * f;
+        break;
+    }
+    case EulerOrder::XZY:
+    {
+        auto ac = a * c;
+        auto ad = a * d;
+        auto bc = b * c;
+        auto bd = b * d;
+
+        te[0] = c * e;
+        te[4] = -f;
+        te[8] = d * e;
+
+        te[1] = ac * f + bd;
+        te[5] = a * e;
+        te[9] = ad * f - bc;
+
+        te[2] = bc * f - ad;
+        te[6] = b * e;
+        te[10] = bd * f + ac;
+        break;
+    }
+    default:
+        assert(false);
+    }
+
+    // bottom row
+    te[3] = 0;
+    te[7] = 0;
+    te[11] = 0;
+
+    // last column
+    te[12] = 0;
+    te[13] = 0;
+    te[14] = 0;
+    te[15] = 1;
+
+    ret.at<TFloat>(0, 0) = te[0];
+    ret.at<TFloat>(1, 0) = te[1];
+    ret.at<TFloat>(2, 0) = te[2];
+    ret.at<TFloat>(0, 1) = te[4];
+    ret.at<TFloat>(1, 1) = te[5];
+    ret.at<TFloat>(2, 1) = te[6];
+    ret.at<TFloat>(0, 2) = te[8];
+    ret.at<TFloat>(1, 2) = te[9];
+    ret.at<TFloat>(2, 2) = te[10];
+
+    return ret;
 }
 
 template <typename TFloat>
@@ -168,56 +422,6 @@ cv::detail::CameraParams createCamera(double focal, double aspect, double ppx, d
         ret.R = R;
     }
     return ret;
-}
-
-
-cv::Mat eulerAnglesToRotationMatrixYXZ(cv::Vec3d& theta)
-{
-    // Calculate rotation about x axis
-    cv::Mat R_x = (cv::Mat_<double>(3, 3) << 
-        1, 0, 0,
-        0, std::cos(theta[0]), -std::sin(theta[0]),
-        0, std::sin(theta[0]), std::cos(theta[0]));
-
-    // Calculate rotation about y axis
-    cv::Mat R_y = (cv::Mat_<double>(3, 3) << 
-        std::cos(theta[1]), 0, std::sin(theta[1]),
-        0, 1, 0,
-        -std::sin(theta[1]), 0, std::cos(theta[1]));
-
-    // Calculate rotation about z axis
-    cv::Mat R_z = (cv::Mat_<double>(3, 3) << 
-        std::cos(theta[2]), -std::sin(theta[2]), 0,
-        std::sin(theta[2]), std::cos(theta[2]), 0,
-        0, 0, 1);
-
-    // Combined rotation matrix
-    cv::Mat R = R_y * R_x * R_z;
-
-    return R;
-}
-
-cv::Mat eulerAnglesToRotationMatrix(cv::Vec3d& theta)
-{
-    // Calculate rotation about x axis
-    cv::Mat R_x = (cv::Mat_<double>(3, 3) << 1, 0, 0,
-        0, std::cos(theta[0]), -std::sin(theta[0]),
-        0, std::sin(theta[0]), std::cos(theta[0]));
-
-    // Calculate rotation about y axis
-    cv::Mat R_y = (cv::Mat_<double>(3, 3) << std::cos(theta[1]), 0, std::sin(theta[1]),
-        0, 1, 0,
-        -std::sin(theta[1]), 0, std::cos(theta[1]));
-
-    // Calculate rotation about z axis
-    cv::Mat R_z = (cv::Mat_<double>(3, 3) << std::cos(theta[2]), -std::sin(theta[2]), 0,
-        std::sin(theta[2]), std::cos(theta[2]), 0,
-        0, 0, 1);
-
-    // Combined rotation matrix
-    cv::Mat R = R_z * R_y * R_x;
-
-    return R;
 }
 
 struct CameraMergeState
@@ -278,28 +482,29 @@ int main(int argc, char* argv[])
                 if (ee->tag == EXIF_TAG_IMAGE_DESCRIPTION)
                 {
                     exif_entry_get_value(ee, buf, std::end(buf) - std::begin(buf) - 1);
-                    double x, y, z;
+                    double alpha, beta, gamma;
                     std::string_view sv(buf);
                     auto pos = sv.find("value0:");
                     sv = sv.substr(pos + 7);
-                    x = std::strtod(sv.data(), nullptr);
+                    alpha = std::strtod(sv.data(), nullptr);
                     pos = sv.find("value1:");
                     sv = sv.substr(pos + 7);
-                    y = std::strtod(sv.data(), nullptr);
+                    beta = std::strtod(sv.data(), nullptr);
                     pos = sv.find("value2:");
                     sv = sv.substr(pos + 7);
-                    z = std::strtod(sv.data(), nullptr);
+                    gamma = std::strtod(sv.data(), nullptr);
 
                     auto r = reinterpret_cast<cv::Mat*>(user_data);
+                    
                     //x -= degToRad(90.0);
                     //x *= -1.0;
                     //y *= -1.0;
                     //z *= -1.0;
-                    *r = cv::Mat(cv::Vec3d(x, y, z));
+                    *r = cv::Mat(cv::Vec3d(beta, alpha, gamma));
 
                     LOGLN("image rotation "
-                        << ": x: " << radToDeg(x) << ", "
-                        << ", y: " << radToDeg(y) << ", z: " << radToDeg(z));
+                        << ": pitch: " << radToDeg(beta) << ", "
+                        << ", yaw: " << radToDeg(alpha) << ", roll: " << radToDeg(gamma));
                 }
             };
             exif_content_foreach_entry(data->ifd[EXIF_IFD_0], getRotation, &ret.R);
@@ -360,7 +565,7 @@ int main(int argc, char* argv[])
         full_img = imread(samples::findFile(img_names[i]));
         cv::Mat tmp;
         rotate(full_img, tmp, ROTATE_90_CLOCKWISE);
-        full_img = tmp;
+        //full_img = tmp;
         tmp.release();
         full_img_sizes[i] = full_img.size();
 
@@ -543,11 +748,11 @@ int main(int argc, char* argv[])
     if (ba_refine_mask[4] == 'x')
         refine_mask(1, 2) = 1;
     adjuster->setRefinementMask(refine_mask);
-    if (!(*adjuster)(features, pairwise_matches, camParamsFromCV))
-    {
-        cout << "Camera parameters adjusting failed.\n";
-        return -1;
-    }
+    //if (!(*adjuster)(features, pairwise_matches, camParamsFromCV))
+    //{
+    //    cout << "Camera parameters adjusting failed.\n";
+    //    return -1;
+    //}
     for (auto&& cam : camParamsFromCV)
     {
         Mat R;
@@ -565,48 +770,51 @@ int main(int argc, char* argv[])
         });
 
     avgFocal /= camParamsFromCV.size();
-
-    cv::Mat baseR = eulerAnglesToRotationMatrix(cv::Vec3d(0, 0, 0));
+    EulerOrder order = EulerOrder::ZYX;
+    cv::Mat baseR = eulerAnglesToRotationMatrix(cv::Vec3d(0, 0, 0), order);
     cv::Mat lastBR;
     std::vector<CameraMergeState> cameraMergeStates;
     std::transform(std::begin(camParamsFromSensor), std::end(camParamsFromSensor), std::back_inserter(cameraMergeStates), [&](auto&& c)
         {
-            auto BR = eulerAnglesToRotationMatrix(cv::Vec3d(c.R.at<double>(0), c.R.at<double>(1), c.R.at<double>(2)));
+            auto BR = eulerAnglesToRotationMatrix(cv::Vec3d(c.R.at<double>(0), c.R.at<double>(1), c.R.at<double>(2)), order);
             if (lastBR.empty())
             {
                 lastBR = BR;
             }
+            
+
+            std::cout << "BR: " << BR << std::endl;
             cv::Mat BAt = BR * lastBR.t();
             lastBR = BR;
             cv::Mat R = BAt * baseR;
             baseR = R;
-
-            auto vec = rotationMatrixToEulerAnglesZYX<double>(R);
+            R = BR;
+            auto vec = rotationMatrixToEulerAngles<double>(R, order);
             vec = cv::Vec3d(radToDeg(vec[0]), radToDeg(vec[1]), radToDeg(vec[2]));
             std::cout << "vec starts 0: " << vec << std::endl;
             return CameraMergeState{ createCamera(
-                minFocal.focal,
+                c.focal / 0.0015 * work_scale,
                 1.0,
                 minFocal.ppx,
                 minFocal.ppy,
                 R,
                 cv::Mat(cv::Vec3f{0, 0, 0}), true) };
         });
-    {
-        auto lastBR = camParamsFromCV.front().R;
-        auto cvFirstIdx = indices.front();
+    //{
+    //    auto lastBR = camParamsFromCV.front().R;
+    //    auto cvFirstIdx = indices.front();
 
-        auto baseR = cameraMergeStates[cvFirstIdx].sensor.R;
-        for (auto&& cvCam : camParamsFromCV)
-        {
-            auto BR = cvCam.R;
-            cv::Mat BAt = BR * lastBR.t();
-            lastBR = BR;
-            cv::Mat R = BAt * baseR;
-            baseR = R;
-            cvCam.R = R;
-        }
-    }
+    //    auto baseR = cameraMergeStates[cvFirstIdx].sensor.R;
+    //    for (auto&& cvCam : camParamsFromCV)
+    //    {
+    //        auto BR = cvCam.R;
+    //        cv::Mat BAt = BR * lastBR.t();
+    //        lastBR = BR;
+    //        cv::Mat R = BAt * baseR;
+    //        baseR = R;
+    //        cvCam.R = R;
+    //    }
+    //}
     {
         int i = 0;
         for (auto idx : indices)
@@ -633,7 +841,7 @@ int main(int argc, char* argv[])
         else
         {
             cv::Mat val = c.sensor.R * c.cv.R.t();
-            auto vec = rotationMatrixToEulerAnglesZYX<double>(val);
+            auto vec = rotationMatrixToEulerAngles<double>(val, EulerOrder::ZYX);
             auto degVec = cv::Vec3d{ radToDeg(vec[0]), radToDeg(vec[1]), radToDeg(vec[2]) };
         }
         std::cout << "error val: " << degVec << std::endl;
@@ -693,7 +901,7 @@ int main(int argc, char* argv[])
     std::vector<cv::detail::CameraParams> cameras;
     std::transform(std::begin(cameraMergeStates), std::end(cameraMergeStates), std::back_inserter(cameras), [](auto&& s)
         {
-            return s.cv;
+            return s.sensor;
         });
 
     for (auto&& cam : cameras)
@@ -704,7 +912,7 @@ int main(int argc, char* argv[])
     }
     for (auto& cam : cameras)
     {
-        auto zyx = rotationMatrixToEulerAnglesZYX<float>(cam.R);
+        auto zyx = rotationMatrixToEulerAngles<float>(cam.R, EulerOrder::ZYX);
         auto zyxDeg = cv::Vec3d(radToDeg(zyx[0]), radToDeg(zyx[1]), radToDeg(zyx[2]));
         std::cout << "rotationMatrix: " << cam.R << std::endl;
         std::cout << "rotation: " << zyxDeg << std::endl;
@@ -891,7 +1099,7 @@ int main(int argc, char* argv[])
         else
 #endif
             seam_finder = makePtr<detail::GraphCutSeamFinder>(GraphCutSeamFinderBase::COST_COLOR);
-}
+    }
     else if (seam_find_type == "gc_colorgrad")
     {
 #ifdef HAVE_OPENCV_CUDALEGACY
@@ -941,7 +1149,7 @@ int main(int argc, char* argv[])
         full_img = imread(samples::findFile(img_names[img_idx]));
         cv::Mat tmp;
         rotate(full_img, tmp, ROTATE_90_CLOCKWISE);
-        full_img = tmp;
+        //full_img = tmp;
         tmp.release();
 
         if (!is_compose_scale_set)
@@ -1071,4 +1279,4 @@ int main(int argc, char* argv[])
     }
 
     return 0;
-}
+    }
