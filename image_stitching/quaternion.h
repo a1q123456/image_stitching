@@ -265,13 +265,13 @@ public:
 		// assumes the upper 3x3 of m is a pure rotation matrix (i.e, unscaled)
 
 		auto m11 = R.at<TMatFloat>(0, 0);
-		auto m12 = R.at<TMatFloat>(0, 1);
-		auto m13 = R.at<TMatFloat>(0, 2);
-		auto m21 = R.at<TMatFloat>(1, 0);
+		auto m12 = R.at<TMatFloat>(1, 0);
+		auto m13 = R.at<TMatFloat>(2, 0);
+		auto m21 = R.at<TMatFloat>(0, 1);
 		auto m22 = R.at<TMatFloat>(1, 1);
-		auto m23 = R.at<TMatFloat>(1, 2);
-		auto m31 = R.at<TMatFloat>(2, 0);
-		auto m32 = R.at<TMatFloat>(2, 1);
+		auto m23 = R.at<TMatFloat>(2, 1);
+		auto m31 = R.at<TMatFloat>(0, 2);
+		auto m32 = R.at<TMatFloat>(1, 2);
 		auto m33 = R.at<TMatFloat>(2, 2);
 
 		auto trace = m11 + m22 + m33;
@@ -565,13 +565,13 @@ public:
 	{
 		cv::Mat_<TFloat> R = cv::Mat_<TFloat>::eye(cv::Size(3, 3));
 		auto&& m11 = R.at<TFloat>(0, 0);
-		auto&& m12 = R.at<TFloat>(0, 1);
-		auto&& m13 = R.at<TFloat>(0, 2);
-		auto&& m21 = R.at<TFloat>(1, 0);
+		auto&& m12 = R.at<TFloat>(1, 0);
+		auto&& m13 = R.at<TFloat>(2, 0);
+		auto&& m21 = R.at<TFloat>(0, 1);
 		auto&& m22 = R.at<TFloat>(1, 1);
-		auto&& m23 = R.at<TFloat>(1, 2);
-		auto&& m31 = R.at<TFloat>(2, 0);
-		auto&& m32 = R.at<TFloat>(2, 1);
+		auto&& m23 = R.at<TFloat>(2, 1);
+		auto&& m31 = R.at<TFloat>(0, 2);
+		auto&& m32 = R.at<TFloat>(1, 2);
 		auto&& m33 = R.at<TFloat>(2, 2);
 
 		TFloat x = _x, y = _y, z = _z, w = _w;

@@ -364,6 +364,167 @@ void crop(cv::Mat& source)
 
     source = source(croppingMask);
 }
+
+#include <sstream>
+
+std::string serializeMatrix(const cv::Mat& m)
+{
+    std::stringstream ss;
+
+    ss << "[";
+    for (auto r = 0; r < m.rows; r++)
+    {
+        for (auto c = 0; c < m.cols; c++)
+        {
+            if (m.type() == CV_32F)
+            {
+                ss << m.at<float>(r, c);
+            }
+            else if (m.type() == CV_64F)
+            {
+                ss << m.at<double>(r, c);
+            }
+            if (c == m.cols - 1)
+            {
+                ss << ";";
+            }
+            else
+            {
+                ss << ",";
+            }
+        }
+    }
+    ss << "]";
+    return ss.str();
+}
+
+cv::Mat deserializeMatrix(std::string s)
+{
+    s = s.substr(1);
+    std::vector<double> values;
+    int nCols = 0, nRows = 0;
+
+    const char* data = s.c_str();
+    while (true)
+    {
+        double val;
+        char* end;
+        values.push_back(std::strtold(data, &end));
+        data = end + 1;
+
+        if (*end == ';')
+        {
+            if (nRows == 0)
+            {
+                nCols++;
+            }
+            nRows++;
+        }
+        else if (nRows == 0)
+        {
+            nCols++;
+        }
+
+        if (*data == ']')
+        {
+            break;
+        }
+    }
+
+    cv::Mat ret = cv::Mat::eye(cv::Size(nCols, nRows), CV_32F);
+    for (int i = 0; i < nRows; i++)
+    {
+        for (int j = 0; j < nCols; j++)
+        {
+            ret.at<float>(i, j) = values[nCols * i + j];
+        }
+    }
+    return ret;
+}
+
+void serializeCameraParams(const std::vector<cv::detail::CameraParams>& cams)
+{
+    std::fstream fs;
+    fs.open("./cams.data", std::ios::out);
+    for (auto&& c : cams)
+    {
+        fs << c.aspect << "@"
+            << c.focal << "@"
+            << c.ppx << "@"
+            << c.ppy << "@"
+            << serializeMatrix(c.t) << "@"
+            << serializeMatrix(c.R) << std::endl;
+    }
+}
+
+std::vector<cv::detail::CameraParams> deserializeCameraParams()
+{
+    std::vector<cv::detail::CameraParams> ret;
+    std::fstream fs;
+    fs.open("./cams.data", std::ios::in);
+    std::string line;
+    while (std::getline(fs, line))
+    {
+        auto pos = line.find("@");
+        auto aspectStr = line.substr(0, pos);
+        pos++;
+        line = line.substr(pos);
+        pos = line.find("@");
+        auto focalStr = line.substr(0, pos);
+        pos++;
+        line = line.substr(pos);
+        pos = line.find("@");
+        auto ppxStr = line.substr(0, pos);
+        pos++;
+        line = line.substr(pos);
+        pos = line.find("@");
+        auto ppyStr = line.substr(0, pos);
+        pos++;
+        line = line.substr(pos);
+        pos = line.find("@");
+        auto tStr = line.substr(0, pos);
+        pos++;
+        auto RStr = line.substr(pos);
+
+        cv::detail::CameraParams c;
+        c.aspect = std::strtod(aspectStr.c_str(), nullptr);
+        c.focal = std::strtod(focalStr.c_str(), nullptr);
+        c.ppx = std::strtod(ppxStr.c_str(), nullptr);
+        c.ppy = std::strtod(ppyStr.c_str(), nullptr);
+        c.R = deserializeMatrix(RStr);
+        c.t = deserializeMatrix(tStr);
+        ret.emplace_back(c);
+    }
+    return ret;
+}
+
+void serializeIndices(const std::vector<int>& indicies)
+{
+    std::fstream fs;
+    fs.open("./indices.data", std::ios::out);
+    for (auto i : indicies)
+    {
+        fs << i << std::endl;
+    }
+}
+
+std::vector<int> deserializeIndices()
+{
+    std::fstream fs;
+    fs.open("./indices.data", std::ios::in);
+    std::vector<int> ret;
+    std::string line;
+    while (std::getline(fs, line))
+    {
+        if (!line.empty())
+        {
+            ret.emplace_back(std::strtol(line.c_str(), nullptr, 10));
+        }
+    }
+    return ret;
+}
+
+
 int main(int argc, char* argv[])
 {
     if (argc < 2)
@@ -423,6 +584,7 @@ int main(int argc, char* argv[])
     std::vector<cv::detail::CameraParams> camParamsFromSensor;
     bool isPortrait = false;
     bool find_features = true;
+    bool serialize_data = true;
     std::transform(
         std::begin(img_names),
         std::end(img_names), std::back_inserter(camParamsFromSensor),
@@ -514,6 +676,7 @@ int main(int argc, char* argv[])
                     param.R = scaler * R;
                     Quaternion<double> q;
                     Quaternion<double> q2;
+                    std::cout << "OrigR: " << param.R << std::endl;
                     q.setFromRotationMatrix<double>(param.R);
                     std::cout << "RQ: " << q.toRotationMatrix() << std::endl;
                     if (state.picIsPortrait)
@@ -525,15 +688,15 @@ int main(int argc, char* argv[])
                         q2.set(-q.x(), q.y(), -q.z(), q.w());
                     }
 
-                    {
-                        auto R = q2.toRotationMatrix();
-                        auto order = EulerOrder::YXZ;
-                        auto euler = rotationMatrixToEulerAngles<double>(R, order);
-                        euler[1] = std::strtod(compassAngleStr.c_str(), nullptr);
-                        R = eulerAnglesToRotationMatrix(euler, order);
-                        std::cout << "R: " << R << std::endl;
-                        q.setFromRotationMatrix<double>(R);
-                    }
+                    //{
+                    //    auto R = q2.toRotationMatrix();
+                    //    auto order = EulerOrder::YXZ;
+                    //    auto euler = rotationMatrixToEulerAngles<double>(R, order);
+                    //    euler[1] = std::strtod(compassAngleStr.c_str(), nullptr);
+                    //    R = eulerAnglesToRotationMatrix(euler, order);
+                    //    std::cout << "R: " << R << std::endl;
+                    //    q.setFromRotationMatrix<double>(R);
+                    //}
                     q = q2;
 
                     std::cout << "Q: " << q << std::endl;
@@ -631,7 +794,7 @@ int main(int argc, char* argv[])
             is_seam_scale_set = true;
         }
 
-        if (find_features)
+        if (find_features && serialize_data)
         {
             computeImageFeatures(finder, img, features[i]);
             features[i].img_idx = i;
@@ -671,13 +834,19 @@ int main(int argc, char* argv[])
         else
             matcher = makePtr<BestOf2NearestRangeMatcher>(range_width, try_cuda, match_conf);
         vector<int> indices;
-        (*matcher)(features, pairwise_matches);
+        if (serialize_data)
+        {
+            (*matcher)(features, pairwise_matches);
+        }
         matcher->collectGarbage();
 
         std::vector<cv::detail::CameraParams> camera_params_subset;
 
-        indices = leaveBiggestComponent(features, pairwise_matches, conf_thresh);
-        if (indices.size() >= 2)
+        if (serialize_data)
+        {
+            indices = leaveBiggestComponent(features, pairwise_matches, conf_thresh);
+        }
+        if (indices.size() >= 2 || !serialize_data)
         {
             vector<Mat> img_subset;
             vector<String> img_names_subset;
@@ -716,11 +885,22 @@ int main(int argc, char* argv[])
             if (ba_refine_mask[4] == 'x')
                 refine_mask(1, 2) = 1;
             adjuster->setRefinementMask(refine_mask);
-            if (!(*adjuster)(features, pairwise_matches, camera_params_subset))
+            if (serialize_data)
             {
-                cout << "Camera parameters adjusting failed.\n";
-                return -1;
+                if (!(*adjuster)(features, pairwise_matches, camera_params_subset))
+                {
+                    cout << "Camera parameters adjusting failed.\n";
+                    return -1;
+                }
+                serializeCameraParams(camera_params_subset);
+                serializeIndices(indices);
             }
+            else
+            {
+                camera_params_subset = deserializeCameraParams();
+                indices = deserializeIndices();
+            }
+
             int ba_orig_idx = -1;
             {
                 for (auto i = 0; i < camera_params_subset.size(); i++)
@@ -751,6 +931,7 @@ int main(int argc, char* argv[])
                     auto R = cam.R;
                     Quaternion<float> Q;
                     Q.setFromRotationMatrix<float>(R);
+                    std::cout << "R: " << R << std::endl;
                     Q.multiply(refQ);
 
                     cam.R = Q.toRotationMatrix();
@@ -763,14 +944,14 @@ int main(int argc, char* argv[])
                     auto curR = camera_params_subset[i].R;
                     Quaternion<float> origQ, curQ;
                     origQ.setFromRotationMatrix<float>(origR);
-                    curQ.setFromRotationMatrix<float>(curR);
-                    curQ.multiply(origQ);
+                    curQ.setFromRotationMatrix<float>(curR).conjugate();
+                    origQ.multiply(curQ);
 
-                    std::cout << "error: " << curQ << std::endl;
+                    std::cout << "error: " << origQ << std::endl;
                     //cameras[indices[i]] = camera_params_subset[i];
                 }
 
-                if (0)
+                if (1)
                 {
 
                     std::vector<std::optional<CameraParams>> refined_cams;
