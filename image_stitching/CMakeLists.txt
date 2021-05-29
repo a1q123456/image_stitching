@@ -4,7 +4,7 @@
 cmake_minimum_required (VERSION 3.17)
 
 # 将源代码添加到此项目的可执行文件。
-add_executable(image_stitching "image_stitching.cpp")
+add_executable(image_stitching "image_stitching.cpp" "serializer.cpp" "cropper.cpp")
 
 find_package(OpenCV REQUIRED)
 find_path(LIBEXIF_INCLUDE_PATH libexif REQUIRED)

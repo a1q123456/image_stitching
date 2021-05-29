@@ -35,6 +35,9 @@
 #include "quaternion.h"
 #include "euler.h"
 
+#include "cropper.h"
+#include "serializer.h"
+
 #define ENABLE_LOG 1
 #define LOG(msg) std::cout << msg
 #define LOGLN(msg) std::cout << msg << std::endl
@@ -50,19 +53,19 @@ bool try_cuda = true;
 double work_megapix = -1;
 double seam_megapix = 0.1;
 double compose_megapix = 0.4;
-float conf_thresh = 1.f;
+float conf_thresh = 0.95f;
 #ifdef HAVE_OPENCV_XFEATURES2D
 string features_type = "surf";
 float match_conf = 0.65f;
 #else
 string features_type = "orb";
-float match_conf = 0.3f;
+float match_conf = 0.32f;
 #endif
 string matcher_type = "homography";
 string estimator_type = "homography";
-string ba_cost_func = "ray";
-string ba_refine_mask = "xxxxx";
-bool do_wave_correct = false;
+string ba_cost_func = "reproj";
+string ba_refine_mask = "_____";
+bool do_wave_correct = true;
 WaveCorrectKind wave_correct = detail::WAVE_CORRECT_HORIZ;
 bool save_graph = false;
 std::string save_graph_to;
@@ -78,6 +81,47 @@ float blend_strength = 5;
 string result_name = "result.jpg";
 bool timelapse = false;
 int range_width = -1;
+bool find_features = true;
+bool serialize_data = true;
+
+struct CaptureModeDesc {
+    double x = 0;
+    int totalImg = 0;
+    double error = 0;
+    double zError = 0;
+    double angles[30];
+    double startY = 0;
+};
+
+constexpr CaptureModeDesc captureModeDesc[]{
+    { 0, 11, 1.0, 0.0, { 0, 0, } },
+    { 34.0, 9, 1.2, 0.0, {0, 36, 75.8, 115.8, 155.8, 195.8, 235.8, 275.8, 315.8}, 4.1 },
+    { 72, 4, 0, 0, { 0, 83, 180, 277 } },
+    { -36, 9, 0.6, 0.0, {0, 36.7, 78, 117, 161.5, 200, 243, 279, 320}, 4.1 },
+    { -72, 4, 0.0, 0.0, { 0, 83, 180, 277 } },
+};
+
+int getGroup(int idx)
+{
+    auto iter = std::begin(captureModeDesc);
+    int curGroup = 0;
+    while ((idx - iter->totalImg) >= 0)
+    {
+        curGroup++;
+        idx -= iter->totalImg;
+        iter++;
+    }
+    return curGroup;
+}
+
+int getGroupIdx(int idx, int group)
+{
+    auto groupIdx = idx - std::accumulate(std::begin(captureModeDesc), std::begin(captureModeDesc) + group, 0, [](int a, CaptureModeDesc d)
+        {
+            return a + d.totalImg;
+        });
+    return groupIdx;
+}
 
 template <typename TFloat>
 TFloat radToDeg(TFloat rad)
@@ -126,402 +170,111 @@ struct CameraMergeState
 {
     cv::detail::CameraParams sensor;
     cv::detail::CameraParams cv;
-
 };
 
-std::vector<std::string> splitMatrixStrItems(std::string_view sv)
+auto getFov(const CameraParams& cam)
 {
-    std::vector<std::string> ret;
-    auto pos = sv.find(",");
-    while (pos != sv.npos)
-    {
-        ret.emplace_back(sv.substr(0, pos));
-        sv = sv.substr(pos + 1);
-        pos = sv.find(",");
-    }
-    ret.emplace_back(sv);
+    auto fx = cam.K().at<double>(0, 0);
+    auto ppx = cam.ppx;
+    auto fy = cam.K().at<double>(1, 1);
+    auto ppy = cam.ppy;
 
-    return ret;
+    auto fovX = 2 * std::atan(ppx / fx);
+    auto fovY = 2 * std::atan(ppy / fy);
+
+    return std::make_pair(fovX, fovY);
+};
+
+auto getGroupStartEnd(int group)
+{
+    auto from = std::accumulate(std::begin(captureModeDesc), std::begin(captureModeDesc) + group, 0, [](int a, const CaptureModeDesc& d)
+        {
+            return a + d.totalImg;
+        });
+    auto to = from + captureModeDesc[group].totalImg - 1;
+    return std::make_pair(from, to);
 }
 
-cv::Mat parseMatrixStr(std::string_view sv)
+auto getFieldRect(
+    const std::vector<CameraParams>& cameras, 
+    int groupId, 
+    int index)
 {
-    sv = sv.substr(1, sv.size() - 2);
-    auto items = splitMatrixStrItems(sv);
-    auto len = (int)std::sqrt(items.size());
-    cv::Mat ret(cv::Size(len, len), CV_64F);
-    for (auto y = 0; y < len; y++)
-    {
-        for (auto x = 0; x < len; x++)
-        {
-            ret.at<double>(y, x) = std::strtod(items.at(y * len + x).c_str(), nullptr);
-        }
-    }
-    return ret;
-}
-bool checkInteriorExterior(const cv::Mat& mask, const cv::Rect& croppingMask,
-    int& top, int& bottom, int& left, int& right)
-{
-    // Return true if the rectangle is fine as it is
-    bool result = true;
+    cv::Rect srcRect{ };
+    auto [srcFrom, srcTo] = getGroupStartEnd(groupId);
+    auto desc = captureModeDesc[groupId];
+    srcRect.y = desc.x;
+    srcRect.x = (M_PI * 2) / desc.totalImg * (index - srcFrom);
+    auto [w, h] = getFov(cameras[index]);
+    srcRect.width = w;
+    srcRect.height = h;
 
-    cv::Mat sub = mask(croppingMask);
-    int x = 0;
-    int y = 0;
-
-    // Count how many exterior pixels are, and choose that side for
-    // reduction where mose exterior pixels occurred (that's the heuristic)
-
-    int top_row = 0;
-    int bottom_row = 0;
-    int left_column = 0;
-    int right_column = 0;
-
-    for (y = 0, x = 0; x < sub.cols; ++x)
-    {
-        // If there is an exterior part in the interior we have
-        // to move the top side of the rect a bit to the bottom
-        if (sub.at<char>(y, x) == 0)
-        {
-            result = false;
-            ++top_row;
-        }
-    }
-
-    for (y = (sub.rows - 1), x = 0; x < sub.cols; ++x)
-    {
-        // If there is an exterior part in the interior we have
-        // to move the bottom side of the rect a bit to the top
-        if (sub.at<char>(y, x) == 0)
-        {
-            result = false;
-            ++bottom_row;
-        }
-    }
-
-    for (y = 0, x = 0; y < sub.rows; ++y)
-    {
-        // If there is an exterior part in the interior
-        if (sub.at<char>(y, x) == 0)
-        {
-            result = false;
-            ++left_column;
-        }
-    }
-
-    for (x = (sub.cols - 1), y = 0; y < sub.rows; ++y)
-    {
-        // If there is an exterior part in the interior
-        if (sub.at<char>(y, x) == 0)
-        {
-            result = false;
-            ++right_column;
-        }
-    }
-
-    // The idea is to set `top = 1` if it's better to reduce
-    // the rect at the top than anywhere else.
-    if (top_row > bottom_row)
-    {
-        if (top_row > left_column)
-        {
-            if (top_row > right_column)
-            {
-                top = 1;
-            }
-        }
-    }
-    else if (bottom_row > left_column)
-    {
-        if (bottom_row > right_column)
-        {
-            bottom = 1;
-        }
-    }
-
-    if (left_column >= right_column)
-    {
-        if (left_column >= bottom_row)
-        {
-            if (left_column >= top_row)
-            {
-                left = 1;
-            }
-        }
-    }
-    else if (right_column >= top_row)
-    {
-        if (right_column >= bottom_row)
-        {
-            right = 1;
-        }
-    }
-
-    return result;
+    return srcRect;
 }
 
-bool compareX(cv::Point a, cv::Point b)
+std::vector<int> myLeaveBiggestComponent(
+    const std::vector<CameraParams>& cameras,
+    std::vector<ImageFeatures>& features, 
+    std::vector<MatchesInfo>& pairwise_matches,
+    float conf_threshold)
 {
-    return a.x < b.x;
-}
+    const int num_images = static_cast<int>(features.size());
 
-bool compareY(cv::Point a, cv::Point b)
-{
-    return a.y < b.y;
-}
 
-void crop(cv::Mat& source)
-{
-    cv::Mat gray;
-    source.convertTo(source, CV_8U);
-    cvtColor(source, gray, cv::COLOR_RGB2GRAY);
-
-    // Extract all the black background (and some interior parts maybe)
-
-    cv::Mat mask = gray > 0;
-
-    // now extract the outer contour
-    std::vector<std::vector<cv::Point> > contours;
-    std::vector<cv::Vec4i> hierarchy;
-
-    cv::findContours(mask, contours, hierarchy, RETR_EXTERNAL, CHAIN_APPROX_NONE, cv::Point(0, 0));
-    cv::Mat contourImage = cv::Mat::zeros(source.size(), CV_8UC3);;
-
-    // Find contour with max elements
-
-    int maxSize = 0;
-    int id = 0;
-
-    for (int i = 0; i < contours.size(); ++i)
+    DisjointSets comps(num_images);
+    for (int i = 0; i < num_images; ++i)
     {
-        if (contours.at((unsigned long)i).size() > maxSize)
+        for (int j = 0; j < num_images; ++j)
         {
-            maxSize = (int)contours.at((unsigned long)i).size();
-            id = i;
+            auto pm = pairwise_matches[i * num_images + j];
+            if (pm.confidence < conf_threshold)
+                continue;
+
+
+            int comp1 = comps.findSetByElem(i);
+            int comp2 = comps.findSetByElem(j);
+            if (comp1 != comp2)
+                comps.mergeSets(comp1, comp2);
         }
     }
 
-    // Draw filled contour to obtain a mask with interior parts
+    int max_comp = static_cast<int>(std::max_element(comps.size.begin(), comps.size.end()) - comps.size.begin());
 
-    cv::Mat contourMask = cv::Mat::zeros(source.size(), CV_8UC1);
-    drawContours(contourMask, contours, id, cv::Scalar(255), -1, 8, hierarchy, 0, cv::Point());
+    std::vector<int> indices;
+    std::vector<int> indices_removed;
+    for (int i = 0; i < num_images; ++i)
+        if (comps.findSetByElem(i) == max_comp)
+            indices.push_back(i);
+        else
+            indices_removed.push_back(i);
 
-    // Sort contour in x/y directions to easily find min/max and next
-
-    std::vector<cv::Point> cSortedX = contours.at((unsigned long)id);
-    std::sort(cSortedX.begin(), cSortedX.end(), compareX);
-    std::vector<cv::Point> cSortedY = contours.at((unsigned long)id);
-    std::sort(cSortedY.begin(), cSortedY.end(), compareY);
-
-    int minXId = 0;
-    int maxXId = (int)(cSortedX.size() - 1);
-    int minYId = 0;
-    int maxYId = (int)(cSortedY.size() - 1);
-
-    cv::Rect croppingMask;
-
-    while ((minXId < maxXId) && (minYId < maxYId))
+    std::vector<ImageFeatures> features_subset;
+    std::vector<MatchesInfo> pairwise_matches_subset;
+    for (size_t i = 0; i < indices.size(); ++i)
     {
-        cv::Point min(cSortedX[minXId].x, cSortedY[minYId].y);
-        cv::Point max(cSortedX[maxXId].x, cSortedY[maxYId].y);
-        croppingMask = cv::Rect(min.x, min.y, max.x - min.x, max.y - min.y);
-
-        // Out-codes: if one of them is set, the rectangle size has to be reduced at that border
-
-        int ocTop = 0;
-        int ocBottom = 0;
-        int ocLeft = 0;
-        int ocRight = 0;
-
-        bool finished = checkInteriorExterior(contourMask, croppingMask, ocTop, ocBottom, ocLeft, ocRight);
-
-        if (finished == true)
+        features_subset.push_back(features[indices[i]]);
+        for (size_t j = 0; j < indices.size(); ++j)
         {
-            break;
-        }
-
-        // Reduce rectangle at border if necessary
-
-        if (ocLeft)
-        {
-            ++minXId;
-        }
-        if (ocRight)
-        {
-            --maxXId;
-        }
-        if (ocTop)
-        {
-            ++minYId;
-        }
-        if (ocBottom)
-        {
-            --maxYId;
+            pairwise_matches_subset.push_back(pairwise_matches[indices[i] * num_images + indices[j]]);
+            pairwise_matches_subset.back().src_img_idx = static_cast<int>(i);
+            pairwise_matches_subset.back().dst_img_idx = static_cast<int>(j);
         }
     }
 
-    // Crop image with created mask
+    if (static_cast<int>(features_subset.size()) == num_images)
+        return indices;
 
-    source = source(croppingMask);
-}
+    LOG("Removed some images, because can't match them or there are too similar images: (");
+    LOG(indices_removed[0] + 1);
+    for (size_t i = 1; i < indices_removed.size(); ++i)
+        LOG(", " << indices_removed[i] + 1);
+    LOGLN(").");
+    LOGLN("Try to decrease the match confidence threshold and/or check if you're stitching duplicates.");
 
-#include <sstream>
+    features = features_subset;
+    pairwise_matches = pairwise_matches_subset;
 
-std::string serializeMatrix(const cv::Mat& m)
-{
-    std::stringstream ss;
-
-    ss << "[";
-    for (auto r = 0; r < m.rows; r++)
-    {
-        for (auto c = 0; c < m.cols; c++)
-        {
-            if (m.type() == CV_32F)
-            {
-                ss << m.at<float>(r, c);
-            }
-            else if (m.type() == CV_64F)
-            {
-                ss << m.at<double>(r, c);
-            }
-            if (c == m.cols - 1)
-            {
-                ss << ";";
-            }
-            else
-            {
-                ss << ",";
-            }
-        }
-    }
-    ss << "]";
-    return ss.str();
-}
-
-cv::Mat deserializeMatrix(std::string s)
-{
-    s = s.substr(1);
-    std::vector<double> values;
-    int nCols = 0, nRows = 0;
-
-    const char* data = s.c_str();
-    while (true)
-    {
-        double val;
-        char* end;
-        values.push_back(std::strtold(data, &end));
-        data = end + 1;
-
-        if (*end == ';')
-        {
-            if (nRows == 0)
-            {
-                nCols++;
-            }
-            nRows++;
-        }
-        else if (nRows == 0)
-        {
-            nCols++;
-        }
-
-        if (*data == ']')
-        {
-            break;
-        }
-    }
-
-    cv::Mat ret = cv::Mat::eye(cv::Size(nCols, nRows), CV_32F);
-    for (int i = 0; i < nRows; i++)
-    {
-        for (int j = 0; j < nCols; j++)
-        {
-            ret.at<float>(i, j) = values[nCols * i + j];
-        }
-    }
-    return ret;
-}
-
-void serializeCameraParams(const std::vector<cv::detail::CameraParams>& cams)
-{
-    std::fstream fs;
-    fs.open("./cams.data", std::ios::out);
-    for (auto&& c : cams)
-    {
-        fs << c.aspect << "@"
-            << c.focal << "@"
-            << c.ppx << "@"
-            << c.ppy << "@"
-            << serializeMatrix(c.t) << "@"
-            << serializeMatrix(c.R) << std::endl;
-    }
-}
-
-std::vector<cv::detail::CameraParams> deserializeCameraParams()
-{
-    std::vector<cv::detail::CameraParams> ret;
-    std::fstream fs;
-    fs.open("./cams.data", std::ios::in);
-    std::string line;
-    while (std::getline(fs, line))
-    {
-        auto pos = line.find("@");
-        auto aspectStr = line.substr(0, pos);
-        pos++;
-        line = line.substr(pos);
-        pos = line.find("@");
-        auto focalStr = line.substr(0, pos);
-        pos++;
-        line = line.substr(pos);
-        pos = line.find("@");
-        auto ppxStr = line.substr(0, pos);
-        pos++;
-        line = line.substr(pos);
-        pos = line.find("@");
-        auto ppyStr = line.substr(0, pos);
-        pos++;
-        line = line.substr(pos);
-        pos = line.find("@");
-        auto tStr = line.substr(0, pos);
-        pos++;
-        auto RStr = line.substr(pos);
-
-        cv::detail::CameraParams c;
-        c.aspect = std::strtod(aspectStr.c_str(), nullptr);
-        c.focal = std::strtod(focalStr.c_str(), nullptr);
-        c.ppx = std::strtod(ppxStr.c_str(), nullptr);
-        c.ppy = std::strtod(ppyStr.c_str(), nullptr);
-        c.R = deserializeMatrix(RStr);
-        c.t = deserializeMatrix(tStr);
-        ret.emplace_back(c);
-    }
-    return ret;
-}
-
-void serializeIndices(const std::vector<int>& indicies)
-{
-    std::fstream fs;
-    fs.open("./indices.data", std::ios::out);
-    for (auto i : indicies)
-    {
-        fs << i << std::endl;
-    }
-}
-
-std::vector<int> deserializeIndices()
-{
-    std::fstream fs;
-    fs.open("./indices.data", std::ios::in);
-    std::vector<int> ret;
-    std::string line;
-    while (std::getline(fs, line))
-    {
-        if (!line.empty())
-        {
-            ret.emplace_back(std::strtol(line.c_str(), nullptr, 10));
-        }
-    }
-    return ret;
+    return indices;
 }
 
 
@@ -583,8 +336,7 @@ int main(int argc, char* argv[])
 
     std::vector<cv::detail::CameraParams> camParamsFromSensor;
     bool isPortrait = false;
-    bool find_features = true;
-    bool serialize_data = true;
+
     std::transform(
         std::begin(img_names),
         std::end(img_names), std::back_inserter(camParamsFromSensor),
@@ -598,8 +350,64 @@ int main(int argc, char* argv[])
             {
                 cv::detail::CameraParams ret{};
                 bool picIsPortrait = false;
+                std::function<cv::Vec3d()> getRotation;
+                std::string path;
             };
+
+            struct CalcRotation
+            {
+                int idx = 0;
+
+                CalcRotation(const CamParamState& s, const std::vector<std::string>& img_names)
+                {
+                    auto iter = std::find(std::begin(img_names), std::end(img_names), s.path);
+                    assert(iter != std::end(img_names));
+                    idx = std::distance(std::begin(img_names), iter);
+                }
+
+                cv::Vec3d operator()()
+                {
+                    constexpr auto groups = std::end(captureModeDesc) - std::begin(captureModeDesc);
+                    auto iter = std::begin(captureModeDesc);
+                    int curGroup = 0;
+                    int tmpIdx = idx;
+                    while ((tmpIdx - iter->totalImg) >= 0)
+                    {
+                        curGroup++;
+                        tmpIdx -= iter->totalImg;
+                        iter++;
+                    }
+                    auto desc = captureModeDesc[curGroup];
+                    auto groupIdx = idx - std::accumulate(std::begin(captureModeDesc), std::begin(captureModeDesc) + curGroup, 0, [](int a, CaptureModeDesc d)
+                        {
+                            return a + d.totalImg;
+                        });
+                    auto isSetEveryAngle = desc.angles[1] != 0;
+                    double angleValue;
+                    if (isSetEveryAngle)
+                    {
+                        angleValue = groupIdx * desc.error + desc.angles[groupIdx];
+                    }
+                    else
+                    {
+                        angleValue = groupIdx* (360.0 / desc.totalImg + desc.error);
+                    }
+                    angleValue += desc.startY;
+                    if (angleValue > 180)
+                    {
+                        angleValue -= 360;
+                    }
+                    return cv::Vec3d{ 
+                        degToRad(desc.x), 
+                        degToRad(angleValue),
+                        degToRad(desc.zError) };
+                }
+            };
+
             CamParamState state;
+            state.path = path;
+            state.getRotation = CalcRotation{ state, img_names };
+
             auto getMatrix = [](ExifEntry* ee, void* user_data) {
                 char buf[1024];
                 if (ee->tag == EXIF_TAG_IMAGE_DESCRIPTION)
@@ -636,10 +444,10 @@ int main(int argc, char* argv[])
                     auto kMatrix = parseMatrixStr(kMatrixStr);
                     state.picIsPortrait = (bool)std::strtol(isPortraitStr.c_str(), nullptr, 10);
 
-                    std::cout << "projMatrix: " << projMatrix << std::endl <<
-                        "viewMatrix: " << viewMatrix << std::endl <<
-                        "cameraTransformMatrix" << camTransformMatrix << std::endl <<
-                        "kMatrix: " << kMatrix << std::endl;
+                    //std::cout << "projMatrix: " << projMatrix << std::endl <<
+                    //    "viewMatrix: " << viewMatrix << std::endl <<
+                    //    "cameraTransformMatrix" << camTransformMatrix << std::endl <<
+                    //    "kMatrix: " << kMatrix << std::endl;
 
                     auto&& param = state.ret;
                     param.aspect = 1.0;
@@ -676,9 +484,9 @@ int main(int argc, char* argv[])
                     param.R = scaler * R;
                     Quaternion<double> q;
                     Quaternion<double> q2;
-                    std::cout << "OrigR: " << param.R << std::endl;
+                    //std::cout << "OrigR: " << param.R << std::endl;
                     q.setFromRotationMatrix<double>(param.R);
-                    std::cout << "RQ: " << q.toRotationMatrix() << std::endl;
+                    //std::cout << "RQ: " << q.toRotationMatrix() << std::endl;
                     if (state.picIsPortrait)
                     {
                         q2.set(q.y(), q.x(), -q.z(), q.w());
@@ -687,7 +495,13 @@ int main(int argc, char* argv[])
                     {
                         q2.set(-q.x(), q.y(), -q.z(), q.w());
                     }
-
+                    //auto euler = rotationMatrixToEulerAngles<double>(q2.toRotationMatrix(), EulerOrder::YXZ);
+                    //euler = cv::Vec3d{ radToDeg(euler[0]), radToDeg(euler[1]), radToDeg(euler[2]) };
+                    //
+                    //auto euler = state.getRotation();
+                    //q2.setFromEuler(euler, EulerOrder::YXZ);
+                    //std::cout << "euler: " << euler << std::endl;
+                    //q2.setFromEuler(euler, EulerOrder::ZYX);
                     //{
                     //    auto R = q2.toRotationMatrix();
                     //    auto order = EulerOrder::YXZ;
@@ -699,13 +513,13 @@ int main(int argc, char* argv[])
                     //}
                     q = q2;
 
-                    std::cout << "Q: " << q << std::endl;
+                    //std::cout << "Q: " << q << std::endl;
                     param.R = q.toRotationMatrix();
 
-                    std::cout << "cameraR: " << param.R << std::endl
-                        << "cameraT: " << param.t << std::endl
-                        << "K: " << param.K() << std::endl
-                        << "scaler: " << scaler << std::endl;
+                    //std::cout << "cameraR: " << param.R << std::endl
+                    //    << "cameraT: " << param.t << std::endl
+                    //    << "K: " << param.K() << std::endl
+                    //    << "scaler: " << scaler << std::endl;
                 }
             };
             exif_content_foreach_entry(data->ifd[EXIF_IFD_0], getMatrix, &state);
@@ -728,7 +542,7 @@ int main(int argc, char* argv[])
     Ptr<Feature2D> finder;
     if (features_type == "orb")
     {
-        finder = ORB::create(500, 1.2, 8, 1, 0, 2, cv::ORB::HARRIS_SCORE, 40, 20);
+        finder = ORB::create(4000, 1.2, 8, 1, 0, 2, cv::ORB::HARRIS_SCORE, 40, 20);
     }
     else if (features_type == "akaze")
     {
@@ -742,7 +556,7 @@ int main(int argc, char* argv[])
 #endif
     else if (features_type == "sift")
     {
-        finder = SIFT::create();
+        finder = SIFT::create(/*0, 3, 0.04, 2, 1.6*/);
     }
     else
     {
@@ -844,13 +658,18 @@ int main(int argc, char* argv[])
 
         if (serialize_data)
         {
-            indices = leaveBiggestComponent(features, pairwise_matches, conf_thresh);
+            indices = myLeaveBiggestComponent(camParamsFromSensor, features, pairwise_matches, conf_thresh);
+            // indices = leaveBiggestComponent(features, pairwise_matches, conf_thresh);
         }
         if (indices.size() >= 2 || !serialize_data)
         {
             vector<Mat> img_subset;
             vector<String> img_names_subset;
             vector<Size> full_img_sizes_subset;
+            if (!serialize_data)
+            {
+                indices = deserializeIndices();
+            }
             for (size_t i = 0; i < indices.size(); ++i)
             {
                 img_names_subset.push_back(img_names[indices[i]]);
@@ -898,116 +717,155 @@ int main(int argc, char* argv[])
             else
             {
                 camera_params_subset = deserializeCameraParams();
-                indices = deserializeIndices();
             }
-
-            int ba_orig_idx = -1;
+            if (do_wave_correct)
             {
-                for (auto i = 0; i < camera_params_subset.size(); i++)
-                {
-                    auto c = camera_params_subset[i];
-                    Quaternion<float> Q;
-                    Q.setFromRotationMatrix<float>(c.R);
-                    std::cout << "BA: " << Q << std::endl;
-
-                    constexpr auto epsilon = std::numeric_limits<float>::epsilon();
-
-                    if (std::abs(Q.x() - 0) <= epsilon && std::abs(Q.y() - 0) <= epsilon && 
-                        std::abs(Q.z() - 0) <= epsilon && std::abs(Q.w() - 1) < epsilon)
-                    {
-                        ba_orig_idx = i;
-                    }
-                }
+                vector<Mat> rmats;
+                for (size_t i = 0; i < camera_params_subset.size(); ++i)
+                    rmats.push_back(camera_params_subset[i].R.clone());
+                waveCorrect(rmats, wave_correct);
+                for (size_t i = 0; i < camera_params_subset.size(); ++i)
+                    camera_params_subset[i].R = rmats[i];
             }
-            if (ba_orig_idx >= 0) {
-                auto refCam = camParamsFromSensor[indices[ba_orig_idx]];
-                auto refMat = refCam.R;
-                Quaternion<float> refQ;
-                refQ.setFromRotationMatrix<float>(refMat);
-                refQ.conjugate();
+            {
+                auto origEuler = rotationMatrixToEulerAngles<float>(cameras[indices.front()].R, EulerOrder::YXZ);
+                auto firstEuler = rotationMatrixToEulerAngles<float>(camera_params_subset.front().R, EulerOrder::YXZ);
+                float deltaY = origEuler[1] - firstEuler[1];
 
-                for (auto&& cam : cameras)
+                for (int i = 0; i < camera_params_subset.size(); i++)
                 {
-                    auto R = cam.R;
-                    Quaternion<float> Q;
-                    Q.setFromRotationMatrix<float>(R);
-                    std::cout << "R: " << R << std::endl;
-                    Q.multiply(refQ);
-
-                    cam.R = Q.toRotationMatrix();
-                    std::cout << "R: " << cam.R << std::endl;
+                    auto&& cam = camera_params_subset[i];
+                    auto euler = rotationMatrixToEulerAngles<float>(cam.R, EulerOrder::YXZ);
+                    auto dEuler = cv::Vec3f{ radToDeg(euler[0]), radToDeg(euler[1]), radToDeg(euler[2]) };
+                    euler[1] += deltaY;
+                    std::cout << "idx: " << indices[i] << ", ba euler: " << euler << std::endl;
+                    //cam.R = eulerAnglesToRotationMatrix(euler, EulerOrder::YXZ);
                 }
 
+
+                cameras = camera_params_subset;
+                img_names = img_names_subset;
+                num_images = img_names.size();
+
+            }
+#if 1
+
+
+            if (0)
+            {
+
+                std::vector<std::optional<CameraParams>> refined_cams;
+                refined_cams.resize(cameras.size());
                 for (auto i = 0; i < indices.size(); i++)
                 {
-                    auto origR = cameras[indices[i]].R;
-                    auto curR = camera_params_subset[i].R;
-                    Quaternion<float> origQ, curQ;
-                    origQ.setFromRotationMatrix<float>(origR);
-                    curQ.setFromRotationMatrix<float>(curR).conjugate();
-                    origQ.multiply(curQ);
-
-                    std::cout << "error: " << origQ << std::endl;
-                    //cameras[indices[i]] = camera_params_subset[i];
+                    refined_cams[indices[i]] = camera_params_subset[i];
                 }
 
-                if (1)
+                auto find_nearest_index = [](const std::vector<std::optional<CameraParams>>& cams, int cur)
                 {
-
-                    std::vector<std::optional<CameraParams>> refined_cams;
-                    refined_cams.resize(cameras.size());
-                    for (auto i = 0; i < indices.size(); i++)
+                    auto iter = std::begin(captureModeDesc);
+                    auto tmpIdx = cur;
+                    int groupIdx = 0;
+                    while ((tmpIdx - iter->totalImg) >= 0)
                     {
-                        refined_cams[indices[i]] = camera_params_subset[i];
+                        groupIdx++;
+                        tmpIdx -= iter->totalImg;
+                        iter++;
                     }
-
-                    auto find_nearest_index = [](const std::vector<std::optional<CameraParams>>& cams, int cur)
+                    auto from = std::accumulate(std::begin(captureModeDesc), std::begin(captureModeDesc) + groupIdx, 0, [](int a, const CaptureModeDesc& d)
+                        {
+                            return a + d.totalImg;
+                        });
+                    auto to = from + iter->totalImg - 1;
+                    auto desc = captureModeDesc[groupIdx];
+                    int i = cur, j = cur;
+                    while (!cams[i] && !cams[j])
                     {
-                        int i = cur, j = cur;
-                        while (!cams[i] && !cams[j])
+                        if (i != to)
                         {
-                            if (i != cams.size() - 1)
-                            {
-                                i++;
-                            }
-                            if (j != 0)
-                            {
-                                j--;
-                            }
+                            i++;
                         }
-                        return cams[i] ? i : j;
-                    };
-
-                    for (int i = 0; i < refined_cams.size(); i++)
-                    {
-                        if (!refined_cams[i])
+                        if (j != from)
                         {
-                            auto nearest_idx = find_nearest_index(refined_cams, i);
-                            auto cur_R = cameras[i].R;
-                            auto ref_R = cameras[nearest_idx].R;
-                            Quaternion<float> cur_Q, ref_Q, base_Q;
-                            cur_Q.setFromRotationMatrix<float>(cur_R);
-                            ref_Q.setFromRotationMatrix<float>(ref_R).conjugate();
-
-                            cur_Q.multiply(ref_Q);
-
-                            auto base_R = refined_cams[nearest_idx].value().R;
-                            base_Q.setFromRotationMatrix<float>(base_R);
-
-                            cur_Q.multiply(base_Q);
-
-                            auto cur = cameras[i];
-                            cur.R = cur_Q.toRotationMatrix();
-
-                            cameras[i] = cur;
+                            j--;
                         }
-                        else
+                        if (i == to && j == from)
                         {
-                            cameras[i] = refined_cams[i].value();
+                            break;
                         }
                     }
+                    if (cams[i])
+                    {
+                        return i;
+                    }
+                    if (cams[j])
+                    {
+                        return j;
+                    }
+                    // fallback
+                    i = cur;
+                    j = cur;
+                    while (!cams[i] && !cams[j])
+                    {
+                        if (i != cams.size() - 1)
+                        {
+                            i++;
+                        }
+                        if (j != 0)
+                        {
+                            j--;
+                        }
+                    }
+                    return cams[i] ? i : j;
+                };
+
+                auto cam_result = cameras;
+                for (int i = 0; i < refined_cams.size(); i++)
+                {
+                    auto result = refined_cams[i];
+                    if (!result)
+                    {
+                        auto cur = cameras[i];
+                        auto nearest_idx = find_nearest_index(refined_cams, i);
+                        auto cur_R = cur.R;
+                        auto ref_R = cameras[nearest_idx].R;
+                        auto base_R = refined_cams[nearest_idx].value().R;
+
+                        cv::Vec3f cur_E, ref_E,base_E;
+                        cur_E = rotationMatrixToEulerAngles<float>(cur_R, EulerOrder::YXZ);
+                        ref_E = rotationMatrixToEulerAngles<float>(ref_R, EulerOrder::YXZ);
+                        base_E = rotationMatrixToEulerAngles<float>(base_R, EulerOrder::YXZ);
+                        auto deltaY = cur_E[1] - ref_E[1];
+                        auto deltaX = cur_E[0] - ref_E[0];
+                        base_E[1] += deltaY;
+                        base_E[0] += deltaX;
+                        base_E[2] = 0;
+                        cur.R = eulerAnglesToRotationMatrix(base_E, EulerOrder::YXZ);
+
+                        //Quaternion<float> base_Q, cur_Q, ref_Q;
+                        //cur_Q.setFromRotationMatrix<float>(cur_R);
+                        //ref_Q.setFromRotationMatrix<float>(ref_R);
+                        //cur_Q.multiply(ref_Q.conjugate());
+                        //base_Q.setFromRotationMatrix<float>(base_R);
+                        //base_Q.multiply(cur_Q);
+
+                        //cur.R = base_Q.toRotationMatrix();
+                        result = cur;
+                    }
+                    cam_result[i] = result.value();
                 }
+                cameras = cam_result;
+                //for (int i = 0; i < cameras.size(); i++)
+                //{
+                //    cameras[i] = refined_cams[i].value();
+                //}
+                //cameras[18] = camParamsFromSensor[18];
+                //cameras[19] = camParamsFromSensor[19];
+                //cameras[20] = camParamsFromSensor[20];
+                //cameras[21] = camParamsFromSensor[21];
             }
+            
+#endif
         }
     }
 
@@ -1036,15 +894,7 @@ int main(int argc, char* argv[])
     else
         warped_image_scale = static_cast<float>(focals[focals.size() / 2 - 1] + focals[focals.size() / 2]) * 0.5f;
 
-    if (do_wave_correct)
-    {
-        vector<Mat> rmats;
-        for (size_t i = 0; i < cameras.size(); ++i)
-            rmats.push_back(cameras[i].R.clone());
-        waveCorrect(rmats, wave_correct);
-        for (size_t i = 0; i < cameras.size(); ++i)
-            cameras[i].R = rmats[i];
-    }
+
 
     LOGLN("Warping images (auxiliary)... ");
 #if ENABLE_LOG
@@ -1375,7 +1225,6 @@ int main(int argc, char* argv[])
         blender->blend(result, result_mask);
 
         LOGLN("Compositing, time: " << ((getTickCount() - t) / getTickFrequency()) << " sec");
-        crop(result);
         imwrite(result_name, result);
     }
 
