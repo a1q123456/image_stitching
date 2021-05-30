@@ -1,0 +1,12 @@
+{
+  "name": "image-stitching",
+  "version": "1.0.0",
+  "dependencies": [
+	  "libexif",
+	  {
+		  "name": "opencv4",
+		  "features": ["world"]
+	  }
+  ],
+  "builtin-baseline":"7bc5b8cdfaf35329c1520b2af8d368e2b1cb78e6"
+}

@@ -5,8 +5,8 @@
 template<typename TFloat>
 class Quaternion 
 {
-	template<typename TFloat>
-	friend std::ostream& operator <<(std::ostream& s, const Quaternion<TFloat>& q);
+	template<typename TFloat_>
+	friend std::ostream& operator <<(std::ostream& s, const Quaternion<TFloat_>& q);
 private:
 	TFloat _x, _y, _z, _w;
 public:
